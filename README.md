@@ -100,7 +100,7 @@ Pi session B -> Telegram topic B -> reply -> Pi session B
 
 A single localhost broker owns Telegram long polling. Every Pi process connects to it using a random secret. If the broker-owning Pi process exits, another connected process can become the broker after reconnecting.
 
-Reply delivery uses ACKs. A reply stays in durable state until the target Pi process confirms that `sendUserMessage()` accepted it.
+Reply delivery uses ACKs. A reply stays in durable state until the target Pi process confirms that `sendUserMessage()` accepted it. Notification mappings and undelivered replies expire after 30 days and are pruned every six hours; topic mappings are retained so resumed Pi sessions continue using their existing Telegram topics.
 
 ## Streaming
 

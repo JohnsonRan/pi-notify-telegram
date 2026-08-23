@@ -32,6 +32,8 @@ const HANDSHAKE_TIMEOUT_MS = 3_000;
 const PROTOCOL_VERSION = 2;
 const STREAM_THROTTLE_MS = 300;
 const DELIVERY_DEDUPE_MAX = 512;
+const STATE_ENTRY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const STATE_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const clientStates = new WeakMap();
 const attachedApis = new WeakSet();
@@ -191,6 +193,25 @@ function trimMappings(state) {
   }
 }
 
+function pruneExpiredBrokerState(state, now = Date.now()) {
+  const cutoff = now - STATE_ENTRY_RETENTION_MS;
+  let changed = false;
+  for (const [messageId, mapping] of state.mappings) {
+    if (Number.isFinite(mapping.createdAt) && mapping.createdAt < cutoff) {
+      state.mappings.delete(messageId);
+      changed = true;
+    }
+  }
+  for (const [deliveryId, pending] of state.pendingReplies) {
+    if (Number.isFinite(pending.createdAt) && pending.createdAt < cutoff) {
+      if (pending.retryTimer) clearTimeout(pending.retryTimer);
+      state.pendingReplies.delete(deliveryId);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function topicName(sessionId, cwd, sessionName) {
   const base = String(sessionName || path.basename(String(cwd || "")) || "Pi").replace(/[\r\n\u0000-\u001f]+/g, " ").trim();
   return `${base || "Pi"} · ${String(sessionId).slice(0, 8)}`.slice(0, 128);
@@ -302,6 +323,7 @@ async function handleTelegramMessage(state, message) {
     return;
   }
 
+  if (pruneExpiredBrokerState(state)) queuePersist(state).catch(() => {});
   if (state.pendingReplies.size >= MAX_PENDING_REPLIES) {
     await telegramCall(state.secret, "sendMessage", {
       chat_id: state.secret.chatId,
@@ -559,9 +581,17 @@ async function startLocalLeader(secret) {
     clients: new Map(),
     clientsBySession: new Map(),
     persistQueue: Promise.resolve(),
+    cleanupTimer: undefined,
     closed: false,
   };
+  pruneExpiredBrokerState(state);
   queuePersist(state).catch((error) => console.warn(`[pi-notify-telegram] Cannot normalize state: ${errorMessage(error)}`));
+  state.cleanupTimer = setInterval(() => {
+    if (pruneExpiredBrokerState(state)) {
+      queuePersist(state).catch((error) => console.warn(`[pi-notify-telegram] Cannot clean state: ${errorMessage(error)}`));
+    }
+  }, STATE_CLEANUP_INTERVAL_MS);
+  state.cleanupTimer.unref?.();
   const server = net.createServer((socket) => {
     socket.setNoDelay(true);
     const client = { socket, registered: false };
@@ -575,6 +605,7 @@ async function startLocalLeader(secret) {
 
   return new Promise((resolve, reject) => {
     const onBindError = (error) => {
+      if (state.cleanupTimer) clearInterval(state.cleanupTimer);
       if (error?.code === "EADDRINUSE") resolve(undefined);
       else reject(error);
     };
@@ -584,6 +615,7 @@ async function startLocalLeader(secret) {
       server.on("error", (error) => console.warn(`[pi-notify-telegram] Broker error: ${errorMessage(error)}`));
       server.on("close", () => {
         state.closed = true;
+        if (state.cleanupTimer) clearInterval(state.cleanupTimer);
         localLeaderPromise = undefined;
       });
       server.unref?.();
@@ -996,5 +1028,5 @@ async function notify(pi, ctx, notification, title, body) {
 module.exports = Object.freeze({
   attach,
   notify,
-  __test: Object.freeze({ assistantText, findReplyTarget, splitTelegramText, telegramFormattedCall, topicName, validateSettings }),
+  __test: Object.freeze({ assistantText, findReplyTarget, pruneExpiredBrokerState, splitTelegramText, telegramFormattedCall, topicName, validateSettings }),
 });

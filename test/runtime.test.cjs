@@ -37,6 +37,22 @@ test("builds stable topic names, chunks text, and rejects unthreaded fallback ro
   assert.equal(runtime.__test.findReplyTarget(state, { reply_to_message: { message_id: 10 } }).sessionId, "latest");
 });
 
+test("prunes stale mappings and undelivered replies but retains topics", () => {
+  const now = Date.now();
+  const old = now - 31 * 24 * 60 * 60 * 1000;
+  const fresh = now - 29 * 24 * 60 * 60 * 1000;
+  const state = {
+    mappings: new Map([[1, { createdAt: old }], [2, { createdAt: fresh }]]),
+    pendingReplies: new Map([["old", { createdAt: old }], ["fresh", { createdAt: fresh }]]),
+    topics: new Map([["session", { createdAt: old }]]),
+  };
+  assert.equal(runtime.__test.pruneExpiredBrokerState(state, now), true);
+  assert.deepEqual([...state.mappings.keys()], [2]);
+  assert.deepEqual([...state.pendingReplies.keys()], ["fresh"]);
+  assert.deepEqual([...state.topics.keys()], ["session"]);
+  assert.equal(runtime.__test.pruneExpiredBrokerState(state, now), false);
+});
+
 test("falls back to plain text only after a deterministic Telegram Bad Request", async () => {
   const originalFetch = global.fetch;
   const payloads = [];
