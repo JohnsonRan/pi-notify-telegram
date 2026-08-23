@@ -123,7 +123,7 @@ test("opens an interactive Pi process through a tracked Windows terminal host", 
   assert.equal(calls[0].command, "C:\\Program Files\\PowerShell\\7\\pwsh.exe");
   assert.ok(calls[0].args.includes("-EncodedCommand"));
   assert.equal(calls[0].options.windowsHide, true);
-  assert.equal(calls[0].options.detached, true);
+  assert.equal(calls[0].options.detached, false);
   const specPath = calls[0].options.env.PI_TELEGRAM_TERMINAL_SPEC_PATH;
   assert.ok(specPath);
   const spec = JSON.parse(await readFile(specPath, "utf8"));

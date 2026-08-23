@@ -211,7 +211,9 @@ class WakeLauncher {
         cwd,
         env: { ...wakeEnv, ...(launch.env || {}) },
         stdio: ["ignore", "ignore", stderrFd],
-        detached: true,
+        // Windows console delegation drops the EncodedCommand when PowerShell
+        // is spawned detached, leaving an empty terminal without a host.
+        detached: !(foreground && this.platform === "win32"),
         windowsHide: launch.windowsHide,
       });
     } catch (error) {
