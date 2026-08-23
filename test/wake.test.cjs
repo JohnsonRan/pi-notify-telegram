@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
-const { mkdtemp, mkdir, readFile, realpath, rm, writeFile } = require("node:fs/promises");
+const { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
@@ -195,6 +195,34 @@ test("falls back to headless mode when Linux has no graphical desktop", async ()
   assert.equal(calls[0].command, "pi-test");
   assert.ok(calls[0].args.includes("--print"));
   child.emit("close", 0, null);
+});
+
+test("cleans all launch artifacts after an asynchronous spawn error", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "pi-wake-spawn-error-"));
+  const launcher = new WakeLauncher({
+    piCommand: "pi-test",
+    openTerminal: true,
+    platform: "win32",
+    terminalSpecDir: directory,
+    spawn() {
+      const child = new EventEmitter();
+      child.pid = 1234;
+      process.nextTick(() => child.emit("error", new Error("spawn failed")));
+      return child;
+    },
+  });
+  try {
+    await assert.rejects(launcher.launch({
+      sessionId: "spawn-error",
+      cwd: process.cwd(),
+      sessionName: "Test",
+      prompt: "hello",
+    }), /spawn failed/);
+    assert.deepEqual(await readdir(directory), []);
+    assert.equal(launcher.isRunning("spawn-error"), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("observes a child that closes immediately after spawning", async () => {

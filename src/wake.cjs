@@ -204,23 +204,32 @@ class WakeLauncher {
         terminal = terminalLaunch.terminal;
       }
     }
-    const stderrFd = openSync(stderrPath, "a", 0o600);
+    const cleanupLaunchArtifacts = async () => {
+      const files = [stderrPath];
+      if (terminalSpecPath) {
+        files.push(terminalSpecPath, `${terminalSpecPath}.pid`, `${terminalSpecPath}.cancel`, `${terminalSpecPath}.result`);
+      }
+      await Promise.all(files.map((file) => unlink(file).catch(() => {})));
+    };
     let child;
     try {
-      child = this.spawn(launch.command, launch.args, {
-        cwd,
-        env: { ...wakeEnv, ...(launch.env || {}) },
-        stdio: ["ignore", "ignore", stderrFd],
-        // Windows console delegation drops the EncodedCommand when PowerShell
-        // is spawned detached, leaving an empty terminal without a host.
-        detached: !(foreground && this.platform === "win32"),
-        windowsHide: launch.windowsHide,
-      });
+      const stderrFd = openSync(stderrPath, "a", 0o600);
+      try {
+        child = this.spawn(launch.command, launch.args, {
+          cwd,
+          env: { ...wakeEnv, ...(launch.env || {}) },
+          stdio: ["ignore", "ignore", stderrFd],
+          // Windows console delegation drops the EncodedCommand when PowerShell
+          // is spawned detached, leaving an empty terminal without a host.
+          detached: !(foreground && this.platform === "win32"),
+          windowsHide: launch.windowsHide,
+        });
+      } finally {
+        closeSync(stderrFd);
+      }
     } catch (error) {
-      unlink(stderrPath).catch(() => {});
+      await cleanupLaunchArtifacts();
       throw error;
-    } finally {
-      closeSync(stderrFd);
     }
     child.wakeStderrPath = stderrPath;
     if (terminalSpecPath) {
@@ -262,12 +271,9 @@ class WakeLauncher {
         child.once("error", reject);
       });
     } catch (error) {
-      if (terminalSpecPath) {
-        await unlink(terminalSpecPath).catch(() => {});
-        await unlink(`${terminalSpecPath}.pid`).catch(() => {});
-        await unlink(`${terminalSpecPath}.cancel`).catch(() => {});
-        await unlink(`${terminalSpecPath}.result`).catch(() => {});
-      }
+      await cleanupLaunchArtifacts();
+      this.cancelled.delete(sessionId);
+      if (child.terminalCancelTimer) clearTimeout(child.terminalCancelTimer);
       if (this.running.get(sessionId) === child) this.running.delete(sessionId);
       throw error;
     }

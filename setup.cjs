@@ -1,17 +1,11 @@
 #!/usr/bin/env node
 
-const { randomBytes } = require("node:crypto");
-const { readFile, writeFile } = require("node:fs/promises");
+const { randomBytes, randomUUID } = require("node:crypto");
+const { readFile, rename, unlink, writeFile } = require("node:fs/promises");
 const net = require("node:net");
-const path = require("node:path");
 const readline = require("node:readline/promises");
 const { stdin, stdout } = require("node:process");
-
-const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(process.env.USERPROFILE || process.env.HOME, ".pi", "agent");
-const SECRET_PATH = path.join(AGENT_DIR, "pi-notify-telegram.secret");
-const CONFIG_PATH = path.join(AGENT_DIR, "pi-notify-telegram.json");
-const STATE_PATH = path.join(AGENT_DIR, "pi-notify-telegram.state.json");
-const DEFAULT_PORT = 43871;
+const { CONFIG_PATH, DEFAULT_PORT, SECRET_PATH, STATE_PATH } = require("./src/paths.cjs");
 
 async function brokerIsRunning() {
   let port;
@@ -79,7 +73,7 @@ function hiddenQuestion(prompt) {
 
 function preserveOperationalConfig(config, previousConfig) {
   const validators = {
-    port: (value) => Number.isInteger(value) && value > 0 && value <= 65535,
+    port: (value) => Number.isInteger(value) && value >= 1024 && value <= 65535,
     linkPreview: (value) => typeof value === "boolean",
     wakeMode: (value) => typeof value === "boolean",
     wakeDefaultCwd: (value) => typeof value === "string",
@@ -93,6 +87,51 @@ function preserveOperationalConfig(config, previousConfig) {
     if (isValid(previousConfig[key])) config[key] = previousConfig[key];
   }
   return config;
+}
+
+async function readOptionalJson(file, read = readFile) {
+  try {
+    return JSON.parse(await read(file, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+async function mergePreviousInstallation(config, state, selected, read = readFile) {
+  let previousConfig;
+  let previousState;
+  try {
+    [previousConfig, previousState] = await Promise.all([
+      readOptionalJson(CONFIG_PATH, read),
+      readOptionalJson(STATE_PATH, read),
+    ]);
+  } catch (error) {
+    throw new Error("Existing Telegram config/state is invalid; move it aside before rerunning setup", { cause: error });
+  }
+  if (previousConfig?.chatId !== selected.chat.id || previousConfig?.allowedUserId !== selected.from.id) {
+    return { config, state };
+  }
+  preserveOperationalConfig(config, previousConfig);
+  if (previousState) {
+    state = {
+      offset: Math.max(state.offset, Number(previousState.offset) || 0),
+      mappings: Array.isArray(previousState.mappings) ? previousState.mappings : [],
+      pendingReplies: Array.isArray(previousState.pendingReplies) ? previousState.pendingReplies : [],
+      topics: Array.isArray(previousState.topics) ? previousState.topics : [],
+    };
+  }
+  return { config, state };
+}
+
+async function writeStagedFiles(entries) {
+  const staged = entries.map((entry) => ({ ...entry, temporary: `${entry.file}.${process.pid}.${randomUUID()}.tmp` }));
+  try {
+    await Promise.all(staged.map((entry) => writeFile(entry.temporary, entry.content, entry.options)));
+    for (const entry of staged) await rename(entry.temporary, entry.file);
+  } finally {
+    await Promise.all(staged.map((entry) => unlink(entry.temporary).catch(() => {})));
+  }
 }
 
 async function main() {
@@ -152,7 +191,7 @@ async function main() {
       message_thread_id: validationTopic.message_thread_id,
     });
 
-    const config = {
+    let config = {
       chatId: selected.chat.id,
       allowedUserId: selected.from.id,
       bridgeSecret: randomBytes(32).toString("hex"),
@@ -166,28 +205,12 @@ async function main() {
       wakeOpenTerminal: true,
     };
     let state = { offset, mappings: [], pendingReplies: [], topics: [] };
-    try {
-      const [previousConfig, previousState] = await Promise.all([
-        readFile(CONFIG_PATH, "utf8").then(JSON.parse),
-        readFile(STATE_PATH, "utf8").then(JSON.parse),
-      ]);
-      if (previousConfig.chatId === selected.chat.id && previousConfig.allowedUserId === selected.from.id) {
-        preserveOperationalConfig(config, previousConfig);
-        state = {
-          offset: Math.max(offset, Number(previousState.offset) || 0),
-          mappings: Array.isArray(previousState.mappings) ? previousState.mappings : [],
-          pendingReplies: Array.isArray(previousState.pendingReplies) ? previousState.pendingReplies : [],
-          topics: Array.isArray(previousState.topics) ? previousState.topics : [],
-        };
-      }
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw new Error("Existing Telegram config/state is invalid; move it aside before rerunning setup", { cause: error });
-    }
+    ({ config, state } = await mergePreviousInstallation(config, state, selected));
 
-    await Promise.all([
-      writeFile(SECRET_PATH, `${token}\n`, { mode: 0o600 }),
-      writeFile(CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 }),
-      writeFile(STATE_PATH, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 }),
+    await writeStagedFiles([
+      { file: SECRET_PATH, content: `${token}\n`, options: { mode: 0o600 } },
+      { file: CONFIG_PATH, content: `${JSON.stringify(config, null, 2)}\n`, options: { mode: 0o600 } },
+      { file: STATE_PATH, content: `${JSON.stringify(state, null, 2)}\n`, options: { mode: 0o600 } },
     ]);
     await call(token, "sendMessage", {
       chat_id: selected.chat.id,
@@ -208,4 +231,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = Object.freeze({ preserveOperationalConfig });
+module.exports = Object.freeze({ mergePreviousInstallation, preserveOperationalConfig, writeStagedFiles });
