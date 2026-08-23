@@ -1,0 +1,963 @@
+#!/usr/bin/env node
+
+/**
+ * Telegram companion for pi-notify.
+ *
+ * Pi processes share one localhost broker. The broker owns Telegram long polling,
+ * while each connected Pi process injects replies with pi.sendUserMessage().
+ */
+
+const { randomInt, randomUUID } = require("node:crypto");
+const { readFile, writeFile, rename } = require("node:fs/promises");
+const net = require("node:net");
+const path = require("node:path");
+
+const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(process.env.USERPROFILE || process.env.HOME, ".pi", "agent");
+const SECRET_PATH = path.join(AGENT_DIR, "pi-notify-telegram.secret");
+const CONFIG_PATH = path.join(AGENT_DIR, "pi-notify-telegram.json");
+const STATE_PATH = path.join(AGENT_DIR, "pi-notify-telegram.state.json");
+const DEFAULT_PORT = 43871;
+const MAX_LINE_BYTES = 256 * 1024;
+const MAX_MAPPINGS = 200;
+const MAX_PENDING_REPLIES = 1000;
+const MAX_TOPICS = 2000;
+const REQUEST_TIMEOUT_MS = 20_000;
+const HANDSHAKE_TIMEOUT_MS = 3_000;
+const PROTOCOL_VERSION = 2;
+const STREAM_THROTTLE_MS = 300;
+const DELIVERY_DEDUPE_MAX = 512;
+
+const clientStates = new WeakMap();
+const attachedApis = new WeakSet();
+let localLeaderPromise;
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function asInteger(value, name) {
+  const number = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(number)) throw new Error(`${name} must be a safe integer`);
+  return number;
+}
+
+function validateSettings(botTokenValue, raw) {
+  const botToken = String(botTokenValue || "").trim();
+  if (!/^\d+:[A-Za-z0-9_-]{20,}$/.test(botToken)) throw new Error("Telegram bot token is invalid");
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Telegram config must be a JSON object");
+  const chatId = asInteger(raw.chatId, "chatId");
+  const allowedUserId = asInteger(raw.allowedUserId ?? chatId, "allowedUserId");
+  const bridgeSecret = String(raw.bridgeSecret || "").trim();
+  if (!/^[a-f0-9]{32,128}$/i.test(bridgeSecret)) throw new Error("bridgeSecret is invalid");
+  const port = raw.port === undefined ? DEFAULT_PORT : asInteger(raw.port, "port");
+  if (port < 1024 || port > 65535) throw new Error("port must be between 1024 and 65535");
+  return Object.freeze({ botToken, chatId, allowedUserId, bridgeSecret, port });
+}
+
+async function readSecret() {
+  let token;
+  let configText;
+  try {
+    [token, configText] = await Promise.all([readFile(SECRET_PATH, "utf8"), readFile(CONFIG_PATH, "utf8")]);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new Error(`Telegram setup is incomplete. Run pi-notify-telegram-setup.cjs first.`);
+    }
+    throw error;
+  }
+  try {
+    return validateSettings(token, JSON.parse(configText));
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error(`Telegram config contains invalid JSON: ${CONFIG_PATH}`);
+    throw error;
+  }
+}
+
+async function telegramCall(secret, method, payload, timeoutMs = 20_000) {
+  let response;
+  try {
+    response = await fetch(`https://api.telegram.org/bot${secret.botToken}/${method}`, {
+      method: "POST",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    throw new Error(`Telegram ${method} failed: ${errorMessage(error)}`);
+  }
+
+  let result;
+  try {
+    result = await response.json();
+  } catch {
+    throw new Error(`Telegram ${method} returned invalid JSON (HTTP ${response.status})`);
+  }
+  if (!response.ok || result?.ok !== true) {
+    throw new Error(`Telegram ${method} failed: ${result?.description || `HTTP ${response.status}`}`);
+  }
+  return result.result;
+}
+
+function sendLine(socket, value) {
+  if (!socket.destroyed) socket.write(`${JSON.stringify(value)}\n`);
+}
+
+function attachLineReader(socket, onMessage, onError) {
+  let buffer = "";
+  socket.setEncoding("utf8");
+  socket.on("data", (chunk) => {
+    buffer += chunk;
+    if (Buffer.byteLength(buffer, "utf8") > MAX_LINE_BYTES) {
+      socket.destroy(new Error("Telegram bridge frame is too large"));
+      return;
+    }
+    for (;;) {
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) break;
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      if (!line) continue;
+      try {
+        onMessage(JSON.parse(line));
+      } catch (error) {
+        onError(error);
+      }
+    }
+  });
+}
+
+async function readBrokerState() {
+  try {
+    const raw = JSON.parse(await readFile(STATE_PATH, "utf8"));
+    const offset = Number.isSafeInteger(raw?.offset) && raw.offset >= 0 ? raw.offset : 0;
+    const mappings = Array.isArray(raw?.mappings)
+      ? raw.mappings.filter((item) => item && Number.isSafeInteger(item.messageId) && typeof item.sessionId === "string").slice(-MAX_MAPPINGS)
+      : [];
+    const pendingReplies = Array.isArray(raw?.pendingReplies)
+      ? raw.pendingReplies.filter((item) => item && typeof item.deliveryId === "string" && typeof item.sessionId === "string" && typeof item.text === "string").slice(-MAX_PENDING_REPLIES)
+      : [];
+    const topics = Array.isArray(raw?.topics)
+      ? raw.topics.filter((item) => item && typeof item.sessionId === "string" && Number.isSafeInteger(item.threadId)).slice(-MAX_TOPICS)
+      : [];
+    return { offset, mappings, pendingReplies, topics };
+  } catch (error) {
+    if (error?.code === "ENOENT") return { offset: 0, mappings: [], pendingReplies: [], topics: [] };
+    if (error instanceof SyntaxError) throw new Error(`Telegram state contains invalid JSON: ${STATE_PATH}`, { cause: error });
+    throw error;
+  }
+}
+
+async function persistBrokerState(state) {
+  const temporary = `${STATE_PATH}.${process.pid}.${randomUUID()}.tmp`;
+  const mappings = [...state.mappings.values()].slice(-MAX_MAPPINGS);
+  const pendingReplies = [...state.pendingReplies.values()]
+    .slice(-MAX_PENDING_REPLIES)
+    .map(({ retryTimer: _retryTimer, ...item }) => item);
+  const topics = [...state.topics.values()].slice(-MAX_TOPICS);
+  await writeFile(temporary, `${JSON.stringify({ offset: state.offset, mappings, pendingReplies, topics }, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporary, STATE_PATH);
+}
+
+function queuePersist(state) {
+  state.persistQueue = state.persistQueue
+    .catch(() => {})
+    .then(() => persistBrokerState(state));
+  return state.persistQueue;
+}
+
+function trimMappings(state) {
+  while (state.mappings.size > MAX_MAPPINGS) {
+    state.mappings.delete(state.mappings.keys().next().value);
+  }
+}
+
+function topicName(sessionId, cwd, sessionName) {
+  const base = String(sessionName || path.basename(String(cwd || "")) || "Pi").replace(/[\r\n\u0000-\u001f]+/g, " ").trim();
+  return `${base || "Pi"} · ${String(sessionId).slice(0, 8)}`.slice(0, 128);
+}
+
+async function ensureTopic(state, sessionId, cwd, sessionName) {
+  const existing = state.topics.get(sessionId);
+  if (existing) return existing;
+  const inflight = state.topicPromises.get(sessionId);
+  if (inflight) return inflight;
+
+  const promise = (async () => {
+    if (state.topics.size >= MAX_TOPICS) throw new Error(`Telegram topic limit reached (${MAX_TOPICS})`);
+    const created = await telegramCall(state.secret, "createForumTopic", {
+      chat_id: state.secret.chatId,
+      name: topicName(sessionId, cwd, sessionName),
+    });
+    const topic = {
+      sessionId,
+      threadId: created.message_thread_id,
+      name: created.name,
+      cwd: String(cwd || ""),
+      createdAt: Date.now(),
+    };
+    state.topics.set(sessionId, topic);
+    await queuePersist(state);
+    return topic;
+  })().finally(() => state.topicPromises.delete(sessionId));
+  state.topicPromises.set(sessionId, promise);
+  return promise;
+}
+
+function isStaleTopicError(error) {
+  return /message thread not found|topic.*(?:closed|not found|deleted)|thread.*not found/i.test(errorMessage(error));
+}
+
+async function withTopicRetry(state, sessionId, cwd, sessionName, operation) {
+  let topic = await ensureTopic(state, sessionId, cwd, sessionName);
+  try {
+    return await operation(topic);
+  } catch (error) {
+    if (!isStaleTopicError(error)) throw error;
+    state.topics.delete(sessionId);
+    await queuePersist(state);
+    topic = await ensureTopic(state, sessionId, cwd, sessionName);
+    return operation(topic);
+  }
+}
+
+function findReplyTarget(state, message) {
+  const threadId = message?.message_thread_id;
+  if (Number.isSafeInteger(threadId)) {
+    const topic = [...state.topics.values()].find((candidate) => candidate.threadId === threadId);
+    if (topic) {
+      const mapping = [...state.mappings.values()].reverse().find((candidate) => candidate.threadId === threadId);
+      return mapping || { sessionId: topic.sessionId, threadId, createdAt: Date.now() };
+    }
+  }
+  const replyId = message?.reply_to_message?.message_id;
+  if (Number.isSafeInteger(replyId) && state.mappings.has(replyId)) return state.mappings.get(replyId);
+  return undefined;
+}
+
+function splitTelegramText(value) {
+  const text = String(value || "");
+  if (text.length <= 4000) return [text];
+  const chunks = [];
+  let rest = text;
+  while (rest.length > 4000) {
+    let index = rest.lastIndexOf("\n", 4000);
+    if (index < 1000) index = 4000;
+    chunks.push(rest.slice(0, index));
+    rest = rest.slice(index).replace(/^\n/, "");
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
+}
+
+function enqueueStream(state, sessionId, task) {
+  const previous = state.streamQueues.get(sessionId) || Promise.resolve();
+  const next = previous.catch(() => {}).then(task);
+  state.streamQueues.set(sessionId, next);
+  next.finally(() => {
+    if (state.streamQueues.get(sessionId) === next) state.streamQueues.delete(sessionId);
+  });
+  return next;
+}
+
+function connectedTarget(state, sessionId) {
+  const client = state.clientsBySession.get(sessionId);
+  return client?.registered && !client.socket.destroyed ? client : undefined;
+}
+
+function deliverPendingReply(state, pending) {
+  const client = connectedTarget(state, pending.sessionId);
+  if (!client) return false;
+  sendLine(client.socket, { type: "reply", ...pending });
+  return true;
+}
+
+function deliverPendingForSession(state, sessionId) {
+  for (const pending of state.pendingReplies.values()) {
+    if (pending.sessionId === sessionId) deliverPendingReply(state, pending);
+  }
+}
+
+async function handleTelegramMessage(state, message) {
+  if (!message || typeof message.text !== "string") return;
+  if (message.chat?.id !== state.secret.chatId || message.from?.id !== state.secret.allowedUserId) return;
+  if (message.from?.is_bot === true || message.text.trim().startsWith("/start")) return;
+
+  const target = findReplyTarget(state, message);
+  if (!target) {
+    await telegramCall(state.secret, "sendMessage", {
+      chat_id: state.secret.chatId,
+      text: "No active Pi session is available for this topic.",
+      reply_to_message_id: message.message_id,
+      ...(Number.isSafeInteger(message.message_thread_id) ? { message_thread_id: message.message_thread_id } : {}),
+    }).catch((error) => console.warn(`[pi-notify-telegram] ${errorMessage(error)}`));
+    return;
+  }
+
+  if (state.pendingReplies.size >= MAX_PENDING_REPLIES) {
+    await telegramCall(state.secret, "sendMessage", {
+      chat_id: state.secret.chatId,
+      ...(Number.isSafeInteger(message.message_thread_id) ? { message_thread_id: message.message_thread_id } : {}),
+      text: "Pi reply queue is full. Please try again after pending replies are delivered.",
+    });
+    return;
+  }
+
+  const pending = {
+    deliveryId: randomUUID(),
+    text: message.text,
+    telegramMessageId: message.message_id,
+    notificationMessageId: target.messageId,
+    threadId: target.threadId || message.message_thread_id,
+    sessionId: target.sessionId,
+    createdAt: Date.now(),
+  };
+  state.pendingReplies.set(pending.deliveryId, pending);
+  await queuePersist(state);
+
+  if (!deliverPendingReply(state, pending)) {
+    await telegramCall(state.secret, "sendMessage", {
+      chat_id: state.secret.chatId,
+      text: "Reply queued until the target Pi session reconnects.",
+      reply_to_message_id: message.message_id,
+      ...(Number.isSafeInteger(message.message_thread_id) ? { message_thread_id: message.message_thread_id } : {}),
+    }).catch((error) => console.warn(`[pi-notify-telegram] ${errorMessage(error)}`));
+  }
+}
+
+async function pollTelegram(state) {
+  while (!state.closed) {
+    try {
+      const updates = await telegramCall(state.secret, "getUpdates", {
+        offset: state.offset,
+        timeout: 25,
+        allowed_updates: ["message"],
+      }, 35_000);
+      for (const update of updates) {
+        if (!Number.isSafeInteger(update?.update_id)) continue;
+        state.offset = Math.max(state.offset, update.update_id + 1);
+        await handleTelegramMessage(state, update.message);
+      }
+      if (updates.length > 0) await queuePersist(state);
+    } catch (error) {
+      if (!state.closed) {
+        console.warn(`[pi-notify-telegram] Poll failed: ${errorMessage(error)}`);
+        await new Promise((resolve) => setTimeout(resolve, 3_000));
+      }
+    }
+  }
+}
+
+async function sendNotification(state, client, message) {
+  const title = String(message.title || "Pi").slice(0, 256);
+  const body = String(message.body || "").slice(0, 3500);
+  const sessionId = String(message.sessionId || client.sessionId);
+  const sent = await withTopicRetry(
+    state,
+    sessionId,
+    message.cwd || client.cwd,
+    message.sessionName || client.sessionName,
+    (topic) => telegramCall(state.secret, "sendMessage", {
+      chat_id: state.secret.chatId,
+      message_thread_id: topic.threadId,
+      text: `${title}\n\n${body}`,
+      reply_markup: {
+        force_reply: true,
+        input_field_placeholder: "Reply to Pi...",
+      },
+    }).then((result) => ({ result, topic })),
+  );
+  const topic = sent.topic;
+  const sentMessage = sent.result;
+  const mapping = {
+    messageId: sentMessage.message_id,
+    threadId: topic.threadId,
+    sessionId,
+    cwd: String(message.cwd || client.cwd),
+    createdAt: Date.now(),
+  };
+  state.mappings.set(mapping.messageId, mapping);
+  trimMappings(state);
+  await queuePersist(state);
+  return sentMessage;
+}
+
+function handleStreamRequest(state, client, message) {
+  if (!client.registered || message.sessionId !== client.sessionId || !Number.isSafeInteger(message.draftId)) {
+    return Promise.reject(new Error("Invalid stream request"));
+  }
+  const text = String(message.text || "");
+  return enqueueStream(state, client.sessionId, () => withTopicRetry(
+    state,
+    client.sessionId,
+    client.cwd,
+    client.sessionName,
+    async (topic) => {
+      if (message.type === "streamDraft") {
+        const preview = text.length <= 4096 ? text : `…${text.slice(-4095)}`;
+        await telegramCall(state.secret, "sendMessageDraft", {
+          chat_id: state.secret.chatId,
+          message_thread_id: topic.threadId,
+          draft_id: message.draftId,
+          text: preview,
+        });
+        return;
+      }
+      if (message.type === "streamFinal" && text.trim()) {
+        for (const chunk of splitTelegramText(text)) {
+          await telegramCall(state.secret, "sendMessage", {
+            chat_id: state.secret.chatId,
+            message_thread_id: topic.threadId,
+            text: chunk,
+          });
+        }
+      }
+    },
+  ));
+}
+
+function schedulePendingRetry(state, pending) {
+  if (pending.retryTimer) return;
+  pending.retryCount = (pending.retryCount || 0) + 1;
+  if (pending.retryCount > 5) {
+    state.pendingReplies.delete(pending.deliveryId);
+    queuePersist(state).catch(() => {});
+    telegramCall(state.secret, "sendMessage", {
+      chat_id: state.secret.chatId,
+      ...(Number.isSafeInteger(pending.threadId) ? { message_thread_id: pending.threadId } : {}),
+      text: "Pi could not accept this reply after several retries. Please send it again.",
+    }).catch((error) => console.warn(`[pi-notify-telegram] Cannot report failed reply: ${errorMessage(error)}`));
+    return;
+  }
+  queuePersist(state).catch(() => {});
+  const delay = Math.min(8_000, 500 * 2 ** (pending.retryCount - 1));
+  pending.retryTimer = setTimeout(() => {
+    pending.retryTimer = undefined;
+    if (state.pendingReplies.has(pending.deliveryId) && !deliverPendingReply(state, pending)) {
+      schedulePendingRetry(state, pending);
+    }
+  }, delay);
+  pending.retryTimer.unref?.();
+}
+
+function handleBrokerRequest(state, client, message) {
+  if (!message || message.auth !== state.secret.bridgeSecret) {
+    client.socket.destroy(new Error("Telegram bridge authentication failed"));
+    return;
+  }
+  if (message.type === "register") {
+    if (message.version !== PROTOCOL_VERSION || typeof message.clientId !== "string" || typeof message.sessionId !== "string") {
+      client.socket.destroy(new Error("Invalid Telegram bridge registration"));
+      return;
+    }
+    client.clientId = message.clientId;
+    client.sessionId = message.sessionId;
+    client.cwd = typeof message.cwd === "string" ? message.cwd : "";
+    client.sessionName = typeof message.sessionName === "string" ? message.sessionName : "";
+    client.registered = true;
+    for (const [registeredSessionId, registeredClient] of state.clientsBySession) {
+      if (registeredClient === client && registeredSessionId !== client.sessionId) state.clientsBySession.delete(registeredSessionId);
+    }
+    const previous = state.clientsBySession.get(client.sessionId);
+    if (previous && previous !== client) previous.socket.destroy();
+    state.clients.set(client.clientId, client);
+    state.clientsBySession.set(client.sessionId, client);
+    sendLine(client.socket, { type: "registered", version: PROTOCOL_VERSION });
+    deliverPendingForSession(state, client.sessionId);
+    return;
+  }
+  if (message.type === "replyAck" && client.registered && typeof message.deliveryId === "string") {
+    const pending = state.pendingReplies.get(message.deliveryId);
+    if (!pending || pending.sessionId !== client.sessionId) return;
+    if (message.ok === true) {
+      if (pending.retryTimer) clearTimeout(pending.retryTimer);
+      state.pendingReplies.delete(message.deliveryId);
+      for (const [messageId, mapping] of state.mappings) {
+        if (messageId === pending.notificationMessageId ||
+            (mapping.sessionId === pending.sessionId &&
+             (!pending.threadId || mapping.threadId === pending.threadId) &&
+             mapping.createdAt <= pending.createdAt)) {
+          state.mappings.delete(messageId);
+        }
+      }
+      queuePersist(state).catch((error) => console.warn(`[pi-notify-telegram] Cannot persist reply ACK: ${errorMessage(error)}`));
+    } else {
+      schedulePendingRetry(state, pending);
+    }
+    return;
+  }
+  if (message.type === "streamDraft") {
+    handleStreamRequest(state, client, message).catch((error) => {
+      console.warn(`[pi-notify-telegram] Draft stream failed: ${errorMessage(error)}`);
+    });
+    return;
+  }
+  if (message.type === "streamFinal") {
+    if (typeof message.requestId !== "string") return;
+    handleStreamRequest(state, client, message).then(() => {
+      sendLine(client.socket, { type: "result", requestId: message.requestId, ok: true });
+    }).catch((error) => {
+      sendLine(client.socket, { type: "result", requestId: message.requestId, ok: false, error: errorMessage(error) });
+    });
+    return;
+  }
+  if (message.type !== "notify" || !client.registered || typeof message.requestId !== "string") return;
+
+  sendNotification(state, client, message).then((sent) => {
+    sendLine(client.socket, { type: "result", requestId: message.requestId, ok: true, messageId: sent.message_id });
+  }).catch((error) => {
+    sendLine(client.socket, { type: "result", requestId: message.requestId, ok: false, error: errorMessage(error) });
+  });
+}
+
+async function startLocalLeader(secret) {
+  const stored = await readBrokerState();
+  const state = {
+    secret,
+    offset: stored.offset,
+    mappings: new Map(stored.mappings.map((item) => [item.messageId, item])),
+    pendingReplies: new Map(stored.pendingReplies.map((item) => [item.deliveryId, item])),
+    topics: new Map(stored.topics.map((item) => [item.sessionId, item])),
+    topicPromises: new Map(),
+    streamQueues: new Map(),
+    clients: new Map(),
+    clientsBySession: new Map(),
+    persistQueue: Promise.resolve(),
+    closed: false,
+  };
+  const server = net.createServer((socket) => {
+    socket.setNoDelay(true);
+    const client = { socket, registered: false };
+    attachLineReader(socket, (message) => handleBrokerRequest(state, client, message), () => socket.destroy());
+    socket.on("close", () => {
+      if (client.clientId && state.clients.get(client.clientId) === client) state.clients.delete(client.clientId);
+      if (client.sessionId && state.clientsBySession.get(client.sessionId) === client) state.clientsBySession.delete(client.sessionId);
+    });
+    socket.on("error", () => {});
+  });
+
+  return new Promise((resolve, reject) => {
+    const onBindError = (error) => {
+      if (error?.code === "EADDRINUSE") resolve(undefined);
+      else reject(error);
+    };
+    server.once("error", onBindError);
+    server.listen(secret.port, "127.0.0.1", () => {
+      server.off("error", onBindError);
+      server.on("error", (error) => console.warn(`[pi-notify-telegram] Broker error: ${errorMessage(error)}`));
+      server.on("close", () => {
+        state.closed = true;
+        localLeaderPromise = undefined;
+      });
+      server.unref?.();
+      state.server = server;
+      pollTelegram(state).catch((error) => console.warn(`[pi-notify-telegram] Poller stopped: ${errorMessage(error)}`));
+      resolve(state);
+    });
+  });
+}
+
+async function ensureLocalLeader(secret) {
+  if (!localLeaderPromise) {
+    localLeaderPromise = startLocalLeader(secret).catch((error) => {
+      localLeaderPromise = undefined;
+      throw error;
+    });
+  }
+  const leader = await localLeaderPromise;
+  // Another process may own the port now but disappear before our next retry.
+  if (!leader) localLeaderPromise = undefined;
+  return leader;
+}
+
+function registerClient(state) {
+  if (!state.socket || state.socket.destroyed) return;
+  sendLine(state.socket, {
+    type: "register",
+    version: PROTOCOL_VERSION,
+    auth: state.secret.bridgeSecret,
+    clientId: state.clientId,
+    sessionId: state.sessionId,
+    cwd: state.cwd,
+    sessionName: state.sessionName,
+  });
+}
+
+function rejectPending(state, error) {
+  for (const pending of state.pending.values()) {
+    clearTimeout(pending.timer);
+    pending.reject(error);
+  }
+  state.pending.clear();
+}
+
+function scheduleReconnect(state) {
+  if (state.closed || state.reconnectTimer) return;
+  state.reconnectTimer = setTimeout(() => {
+    state.reconnectTimer = undefined;
+    connectClient(state).catch(() => scheduleReconnect(state));
+  }, 1_000);
+  state.reconnectTimer.unref?.();
+}
+
+async function connectClient(state) {
+  if (state.closed) throw new Error("Telegram bridge client is closed");
+  if (state.connected && state.socket && !state.socket.destroyed) return;
+  if (state.connectPromise) return state.connectPromise;
+
+  state.connectPromise = (async () => {
+    const attempt = () => new Promise((resolve, reject) => {
+      const socket = net.createConnection({ host: "127.0.0.1", port: state.secret.port });
+      const fail = (error) => {
+        socket.destroy();
+        reject(error);
+      };
+      socket.once("error", fail);
+      socket.once("connect", () => {
+        socket.off("error", fail);
+        socket.setNoDelay(true);
+        state.socket = socket;
+        state.connected = false;
+        const timer = setTimeout(() => {
+          state.handshake = undefined;
+          socket.destroy();
+          reject(new Error("Telegram bridge handshake timed out"));
+        }, HANDSHAKE_TIMEOUT_MS);
+        state.handshake = {
+          resolve: () => {
+            clearTimeout(timer);
+            state.handshake = undefined;
+            state.connected = true;
+            resolve();
+          },
+          reject: (error) => {
+            clearTimeout(timer);
+            state.handshake = undefined;
+            reject(error);
+          },
+        };
+        attachLineReader(socket, (message) => handleClientMessage(state, message), (error) => socket.destroy(error));
+        socket.on("close", () => {
+          if (state.socket !== socket) return;
+          state.handshake?.reject(new Error("Telegram bridge disconnected during handshake"));
+          state.connected = false;
+          state.socket = undefined;
+          rejectPending(state, new Error("Telegram bridge disconnected"));
+          scheduleReconnect(state);
+        });
+        socket.on("error", () => {});
+        registerClient(state);
+      });
+    });
+
+    try {
+      await attempt();
+    } catch (firstError) {
+      await ensureLocalLeader(state.secret);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      try {
+        await attempt();
+      } catch {
+        throw firstError;
+      }
+    }
+  })().finally(() => {
+    state.connectPromise = undefined;
+  });
+  return state.connectPromise;
+}
+
+function handleClientMessage(state, message) {
+  if (message?.type === "registered") {
+    if (message.version !== PROTOCOL_VERSION) {
+      state.handshake?.reject(new Error("Telegram bridge protocol version mismatch"));
+      state.socket?.destroy();
+      return;
+    }
+    state.handshake?.resolve();
+    return;
+  }
+  if (message?.type === "result" && typeof message.requestId === "string") {
+    const pending = state.pending.get(message.requestId);
+    if (!pending) return;
+    state.pending.delete(message.requestId);
+    clearTimeout(pending.timer);
+    if (message.ok === true) pending.resolve(message);
+    else pending.reject(new Error(message.error || "Telegram notification failed"));
+    return;
+  }
+  if (message?.type !== "reply" || typeof message.text !== "string" || typeof message.deliveryId !== "string") return;
+  const sendAck = (ok, error) => sendLine(state.socket, {
+    type: "replyAck",
+    auth: state.secret.bridgeSecret,
+    deliveryId: message.deliveryId,
+    ok,
+    ...(error ? { error } : {}),
+  });
+  if (state.seenDeliveries.has(message.deliveryId)) {
+    sendAck(true);
+    return;
+  }
+  const liveSessionId = state.ctx?.sessionManager?.getSessionId?.();
+  if (message.sessionId !== state.sessionId || liveSessionId !== message.sessionId) {
+    if (typeof liveSessionId === "string" && liveSessionId !== state.sessionId) {
+      state.sessionId = liveSessionId;
+      state.cwd = String(state.ctx?.cwd || state.cwd);
+      registerClient(state);
+    }
+    sendAck(false, "Target Pi session is not active in this process");
+    return;
+  }
+  try {
+    if (state.ctx?.isIdle?.() === false) state.pi.sendUserMessage(message.text, { deliverAs: "steer" });
+    else state.pi.sendUserMessage(message.text);
+    rememberDelivery(state, message.deliveryId);
+    sendAck(true);
+  } catch (error) {
+    const detail = errorMessage(error);
+    sendAck(false, detail);
+    console.warn(`[pi-notify-telegram] Cannot inject reply: ${detail}`);
+  }
+}
+
+function hydrateSeenDeliveries(state) {
+  state.seenDeliveries.clear();
+  const entries = state.ctx?.sessionManager?.getEntries?.() || [];
+  for (const entry of entries.slice(-DELIVERY_DEDUPE_MAX * 2)) {
+    if (entry?.type !== "custom" || entry.customType !== "pi_notify_telegram_delivery") continue;
+    const deliveryId = entry.data?.deliveryId;
+    if (typeof deliveryId === "string") state.seenDeliveries.add(deliveryId);
+  }
+  while (state.seenDeliveries.size > DELIVERY_DEDUPE_MAX) {
+    state.seenDeliveries.delete(state.seenDeliveries.values().next().value);
+  }
+}
+
+function rememberDelivery(state, deliveryId) {
+  state.seenDeliveries.add(deliveryId);
+  while (state.seenDeliveries.size > DELIVERY_DEDUPE_MAX) {
+    state.seenDeliveries.delete(state.seenDeliveries.values().next().value);
+  }
+  state.pi.appendEntry?.("pi_notify_telegram_delivery", { deliveryId });
+}
+
+function clientStateFor(pi, ctx, notification) {
+  let state = clientStates.get(pi);
+  if (!state) {
+    state = {
+      pi,
+      ctx,
+      secret: undefined,
+      clientId: randomUUID(),
+      sessionId: String(notification.sessionId || ctx?.sessionManager?.getSessionId?.() || ""),
+      cwd: String(notification.cwd || ctx?.cwd || ""),
+      sessionName: String(pi.getSessionName?.() || ""),
+      socket: undefined,
+      connected: false,
+      ready: undefined,
+      connectPromise: undefined,
+      handshake: undefined,
+      reconnectTimer: undefined,
+      pending: new Map(),
+      seenDeliveries: new Set(),
+      closed: false,
+    };
+    clientStates.set(pi, state);
+    hydrateSeenDeliveries(state);
+    const refreshSession = (_event, liveCtx) => {
+      if (!liveCtx?.sessionManager) return;
+      state.ctx = liveCtx;
+      const nextSessionId = String(liveCtx.sessionManager.getSessionId() || "");
+      const nextCwd = String(liveCtx.cwd || "");
+      const nextSessionName = String(pi.getSessionName?.() || "");
+      const changed = state.sessionId !== nextSessionId || state.cwd !== nextCwd || state.sessionName !== nextSessionName;
+      state.sessionId = nextSessionId;
+      state.cwd = nextCwd;
+      state.sessionName = nextSessionName;
+      if (changed) {
+        hydrateSeenDeliveries(state);
+        registerClient(state);
+      }
+    };
+    pi.on("session_start", refreshSession);
+    pi.on("session_info_changed", refreshSession);
+    pi.on("session_shutdown", () => {
+      state.closed = true;
+      if (state.currentStream?.timer) clearTimeout(state.currentStream.timer);
+      if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
+      rejectPending(state, new Error("Pi session shut down"));
+      state.socket?.destroy();
+      clientStates.delete(pi);
+    });
+  }
+  state.ctx = ctx;
+  const nextSessionId = String(notification.sessionId || "");
+  const nextCwd = String(notification.cwd || "");
+  const nextSessionName = String(pi.getSessionName?.() || "");
+  const changed = state.sessionId !== nextSessionId || state.cwd !== nextCwd || state.sessionName !== nextSessionName;
+  state.sessionId = nextSessionId;
+  state.cwd = nextCwd;
+  state.sessionName = nextSessionName;
+  if (changed) {
+    hydrateSeenDeliveries(state);
+    if (state.connected) registerClient(state);
+  }
+  return state;
+}
+
+async function requestBroker(state, payload, timeoutLabel) {
+  await connectClient(state);
+  const requestId = randomUUID();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      state.pending.delete(requestId);
+      reject(new Error(`${timeoutLabel} timed out`));
+    }, REQUEST_TIMEOUT_MS);
+    timer.unref?.();
+    state.pending.set(requestId, { resolve, reject, timer });
+    sendLine(state.socket, {
+      ...payload,
+      auth: state.secret.bridgeSecret,
+      requestId,
+      sessionId: state.sessionId,
+    });
+  });
+}
+
+function requestNotification(state, title, body) {
+  return requestBroker(state, {
+    type: "notify",
+    title: String(title ?? "Pi"),
+    body: String(body ?? ""),
+    cwd: state.cwd,
+    sessionName: state.sessionName,
+  }, "Telegram notification");
+}
+
+async function initializeState(pi, ctx) {
+  const notification = {
+    sessionId: ctx?.sessionManager?.getSessionId?.() || "",
+    cwd: ctx?.cwd || "",
+  };
+  const state = clientStateFor(pi, ctx, notification);
+  if (!state.ready) {
+    state.ready = (async () => {
+      if (!state.secret) state.secret = await readSecret();
+      await connectClient(state);
+      return state;
+    })().catch((error) => {
+      state.ready = undefined;
+      throw error;
+    });
+  }
+  return state.ready;
+}
+
+function assistantText(message) {
+  if (message?.role !== "assistant" || !Array.isArray(message.content)) return "";
+  return message.content
+    .filter((item) => item?.type === "text" && typeof item.text === "string")
+    .map((item) => item.text)
+    .join("\n");
+}
+
+async function sendStream(state, type, stream) {
+  if (state.ready) await state.ready;
+  if (type === "streamFinal") {
+    const payload = { type, draftId: stream.draftId, text: stream.text };
+    try {
+      await requestBroker(state, payload, "Telegram stream finalization");
+    } catch (error) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await requestBroker(state, payload, "Telegram stream finalization retry");
+    }
+    return;
+  }
+  await connectClient(state);
+  sendLine(state.socket, {
+    type,
+    auth: state.secret.bridgeSecret,
+    sessionId: state.sessionId,
+    draftId: stream.draftId,
+    text: stream.text,
+  });
+}
+
+function scheduleStreamDraft(state) {
+  const stream = state.currentStream;
+  if (!stream || stream.timer) return;
+  stream.timer = setTimeout(() => {
+    stream.timer = undefined;
+    if (state.currentStream !== stream || stream.text === stream.lastSent) return;
+    stream.lastSent = stream.text;
+    sendStream(state, "streamDraft", stream).catch((error) => {
+      console.warn(`[pi-notify-telegram] Cannot stream draft: ${errorMessage(error)}`);
+    });
+  }, STREAM_THROTTLE_MS);
+  stream.timer.unref?.();
+}
+
+function attach(pi) {
+  if (!pi || typeof pi.on !== "function" || attachedApis.has(pi)) return;
+  attachedApis.add(pi);
+
+  pi.on("session_start", (_event, ctx) => {
+    return initializeState(pi, ctx).catch((error) => {
+      console.warn(`[pi-notify-telegram] Cannot initialize: ${errorMessage(error)}`);
+    });
+  });
+
+  pi.on("message_start", (event) => {
+    if (event.message?.role !== "assistant") return;
+    const state = clientStates.get(pi);
+    if (!state || state.closed) return;
+    const stream = {
+      draftId: randomInt(1, 2_147_483_647),
+      text: assistantText(event.message),
+      lastSent: undefined,
+      timer: undefined,
+    };
+    state.currentStream = stream;
+    sendStream(state, "streamDraft", stream).then(() => {
+      stream.lastSent = stream.text;
+    }).catch((error) => {
+      console.warn(`[pi-notify-telegram] Cannot start stream: ${errorMessage(error)}`);
+    });
+  });
+
+  pi.on("message_update", (event) => {
+    const state = clientStates.get(pi);
+    const stream = state?.currentStream;
+    if (!stream || event.message?.role !== "assistant") return;
+    stream.text = assistantText(event.message);
+    scheduleStreamDraft(state);
+  });
+
+  pi.on("message_end", (event) => {
+    const state = clientStates.get(pi);
+    const stream = state?.currentStream;
+    if (!state || !stream || event.message?.role !== "assistant") return;
+    if (stream.timer) clearTimeout(stream.timer);
+    stream.timer = undefined;
+    stream.text = assistantText(event.message);
+    state.currentStream = undefined;
+    sendStream(state, "streamFinal", stream).catch((error) => {
+      console.warn(`[pi-notify-telegram] Cannot finalize stream: ${errorMessage(error)}`);
+    });
+  });
+}
+
+async function notify(pi, ctx, notification, title, body) {
+  if (!pi || typeof pi.on !== "function" || typeof pi.sendUserMessage !== "function") {
+    throw new Error("Telegram companion requires the Pi ExtensionAPI");
+  }
+  const state = clientStateFor(pi, ctx, notification);
+  if (state.ready) await state.ready;
+  else await initializeState(pi, ctx);
+  await requestNotification(state, title, body);
+}
+
+module.exports = Object.freeze({
+  attach,
+  notify,
+  __test: Object.freeze({ assistantText, findReplyTarget, splitTelegramText, topicName, validateSettings }),
+});

@@ -1,0 +1,52 @@
+{
+  "name": "pi-notify-telegram",
+  "version": "0.1.0",
+  "description": "Threaded Telegram remote interface for Pi sessions with native streaming and notification replies",
+  "type": "module",
+  "files": [
+    "index.ts",
+    "src",
+    "setup.cjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.cjs",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@types/node": "^26.0.0",
+    "typescript": "^7.0.0"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "telegram",
+    "notifications",
+    "streaming",
+    "threads"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JohnsonRan/pi-notify-telegram.git"
+  },
+  "bugs": {
+    "url": "https://github.com/JohnsonRan/pi-notify-telegram/issues"
+  },
+  "homepage": "https://github.com/JohnsonRan/pi-notify-telegram#readme"
+}
