@@ -34,6 +34,7 @@ const REQUEST_TIMEOUT_MS = 20_000;
 const HANDSHAKE_TIMEOUT_MS = 3_000;
 const PROTOCOL_VERSION = 2;
 const STREAM_THROTTLE_MS = 300;
+const STATUS_HEARTBEAT_MS = 5_000;
 const DELIVERY_DEDUPE_MAX = 512;
 const STATE_ENTRY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const STATE_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -1233,6 +1234,9 @@ function clientStateFor(pi, ctx, notification) {
       reconnectTimer: undefined,
       pending: new Map(),
       seenDeliveries: new Set(),
+      currentStream: undefined,
+      agentActivity: undefined,
+      statusHeartbeat: undefined,
       closed: false,
     };
     clientStates.set(pi, state);
@@ -1260,6 +1264,7 @@ function clientStateFor(pi, ctx, notification) {
     pi.on("session_shutdown", () => {
       state.closed = true;
       if (state.currentStream?.timer) clearTimeout(state.currentStream.timer);
+      if (state.statusHeartbeat) clearTimeout(state.statusHeartbeat);
       if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
       rejectPending(state, new Error("Pi session shut down"));
       state.socket?.destroy();
@@ -1340,6 +1345,71 @@ function assistantText(message) {
     .join("\n");
 }
 
+function oneLine(value, limit = 120) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > limit ? `${text.slice(0, Math.max(1, limit - 1))}…` : text;
+}
+
+function formatElapsed(ms) {
+  const seconds = Math.max(0, Math.floor(Number(ms || 0) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${seconds % 60}s`;
+}
+
+function summarizeToolArgs(toolName, args) {
+  const value = args && typeof args === "object" ? args : {};
+  if (toolName === "bash") return oneLine(value.command, 140);
+  if (["read", "write", "edit"].includes(toolName)) return oneLine(value.path || value.file_path, 140);
+  if (toolName === "subagent") {
+    if (typeof value.agent === "string") return oneLine(value.agent, 80);
+    if (typeof value.action === "string") return oneLine(value.action, 80);
+    if (typeof value.workflowScript === "string") return "workflow";
+  }
+  for (const key of ["query", "question", "prompt", "task", "url", "selector", "path"]) {
+    if (typeof value[key] === "string" && value[key].trim()) return oneLine(value[key], 140);
+  }
+  return "";
+}
+
+function subagentProgress(partialResult) {
+  const details = partialResult?.details;
+  const progress = Array.isArray(details?.progress) ? details.progress : [];
+  if (progress.length === 0) return undefined;
+  const done = progress.filter((item) => item?.status === "completed").length;
+  const failed = progress.filter((item) => item?.status === "failed").length;
+  const detached = progress.filter((item) => item?.status === "detached").length;
+  const running = progress.filter((item) => item?.status === "running");
+  const lines = [`Subagents · ${done}/${progress.length} done${running.length ? ` · ${running.length} running` : ""}${failed ? ` · ${failed} failed` : ""}${detached ? ` · ${detached} detached` : ""}`];
+  for (const item of progress.slice(0, 6)) {
+    const icon = item?.status === "completed" ? "✓" : item?.status === "failed" ? "✗" : item?.status === "detached" ? "↗" : item?.status === "running" ? "⏳" : "○";
+    const activity = item?.currentTool
+      ? `${item.currentTool}${item.currentPath ? ` · ${oneLine(item.currentPath, 70)}` : ""}`
+      : item?.activityState === "needs_attention"
+        ? "needs attention"
+        : item?.status || "pending";
+    lines.push(`${icon} ${oneLine(item?.agent || `agent ${Number(item?.index || 0) + 1}`, 40)} · ${activity}`);
+  }
+  return lines.join("\n");
+}
+
+function formatLiveStatus(activity, now = Date.now()) {
+  if (!activity) return "Main agent · Running";
+  const heading = `Main agent · Turn ${Math.max(1, Number(activity.turnIndex || 0) + 1)} · ${formatElapsed(now - activity.startedAt)}`;
+  if (activity.toolName === "subagent") {
+    return [heading, subagentProgress(activity.partialResult) || `Subagent · ${summarizeToolArgs("subagent", activity.toolArgs) || "starting"}`].join("\n");
+  }
+  if (activity.toolName) {
+    const detail = summarizeToolArgs(activity.toolName, activity.toolArgs);
+    return [heading, `Tool · ${activity.toolName}${activity.toolError ? " · failed" : ""}`, detail].filter(Boolean).join("\n");
+  }
+  return `${heading}\n${activity.phase || "Thinking"}`;
+}
+
+function streamDraftText(stream) {
+  return stream.text.trim() ? stream.text : stream.statusText || "Main agent · Running";
+}
+
 async function sendStream(state, type, stream) {
   if (state.ready) await state.ready;
   if (type === "streamFinal") {
@@ -1358,8 +1428,38 @@ async function sendStream(state, type, stream) {
     auth: state.secret.bridgeSecret,
     sessionId: state.sessionId,
     draftId: stream.draftId,
-    text: stream.text,
+    text: streamDraftText(stream),
   });
+}
+
+function ensureStatusStream(state) {
+  if (!state.currentStream) {
+    state.currentStream = {
+      draftId: randomInt(1, 2_147_483_647),
+      text: "",
+      statusText: "",
+      lastSent: undefined,
+      timer: undefined,
+    };
+  }
+  return state.currentStream;
+}
+
+function updateLiveStatus(state) {
+  if (!state?.agentActivity || state.closed) return;
+  const stream = ensureStatusStream(state);
+  stream.statusText = formatLiveStatus(state.agentActivity);
+  scheduleStreamDraft(state);
+}
+
+function scheduleStatusHeartbeat(state) {
+  if (state.statusHeartbeat || state.closed || !state.agentActivity) return;
+  state.statusHeartbeat = setTimeout(() => {
+    state.statusHeartbeat = undefined;
+    updateLiveStatus(state);
+    scheduleStatusHeartbeat(state);
+  }, STATUS_HEARTBEAT_MS);
+  state.statusHeartbeat.unref?.();
 }
 
 function scheduleStreamDraft(state) {
@@ -1367,8 +1467,9 @@ function scheduleStreamDraft(state) {
   if (!stream || stream.timer) return;
   stream.timer = setTimeout(() => {
     stream.timer = undefined;
-    if (state.currentStream !== stream || stream.text === stream.lastSent) return;
-    stream.lastSent = stream.text;
+    const text = streamDraftText(stream);
+    if (state.currentStream !== stream || text === stream.lastSent) return;
+    stream.lastSent = text;
     sendStream(state, "streamDraft", stream).catch((error) => {
       console.warn(`[pi-notify-telegram] Cannot stream draft: ${errorMessage(error)}`);
     });
@@ -1386,18 +1487,61 @@ function attach(pi) {
     });
   });
 
+  pi.on("agent_start", () => {
+    const state = clientStates.get(pi);
+    if (!state || state.closed) return;
+    state.agentActivity = { startedAt: Date.now(), turnIndex: 0, phase: "Thinking" };
+    updateLiveStatus(state);
+    scheduleStatusHeartbeat(state);
+  });
+
+  pi.on("turn_start", (event) => {
+    const state = clientStates.get(pi);
+    if (!state || state.closed || !state.agentActivity) return;
+    state.agentActivity.turnIndex = event.turnIndex;
+    state.agentActivity.phase = "Thinking";
+    state.agentActivity.toolName = undefined;
+    state.agentActivity.toolArgs = undefined;
+    state.agentActivity.partialResult = undefined;
+    state.agentActivity.toolError = false;
+    updateLiveStatus(state);
+  });
+
+  pi.on("tool_execution_start", (event) => {
+    const state = clientStates.get(pi);
+    if (!state || state.closed || !state.agentActivity) return;
+    state.agentActivity.phase = "Running tool";
+    state.agentActivity.toolName = event.toolName;
+    state.agentActivity.toolArgs = event.args;
+    state.agentActivity.partialResult = undefined;
+    state.agentActivity.toolError = false;
+    updateLiveStatus(state);
+  });
+
+  pi.on("tool_execution_update", (event) => {
+    const state = clientStates.get(pi);
+    if (!state || state.closed || !state.agentActivity || state.agentActivity.toolName !== event.toolName) return;
+    state.agentActivity.partialResult = event.partialResult;
+    updateLiveStatus(state);
+  });
+
+  pi.on("tool_execution_end", (event) => {
+    const state = clientStates.get(pi);
+    if (!state || state.closed || !state.agentActivity) return;
+    state.agentActivity.phase = event.isError ? "Tool failed; reviewing" : "Reviewing tool result";
+    state.agentActivity.toolName = event.toolName;
+    state.agentActivity.toolError = event.isError;
+    updateLiveStatus(state);
+  });
+
   pi.on("message_start", (event) => {
     if (event.message?.role !== "assistant") return;
     const state = clientStates.get(pi);
     if (!state || state.closed) return;
-    const stream = {
-      draftId: randomInt(1, 2_147_483_647),
-      text: assistantText(event.message),
-      lastSent: undefined,
-      timer: undefined,
-    };
-    state.currentStream = stream;
-    stream.lastSent = stream.text;
+    const stream = ensureStatusStream(state);
+    stream.text = assistantText(event.message);
+    const text = streamDraftText(stream);
+    stream.lastSent = text;
     sendStream(state, "streamDraft", stream).catch((error) => {
       console.warn(`[pi-notify-telegram] Cannot start stream: ${errorMessage(error)}`);
     });
@@ -1422,6 +1566,14 @@ function attach(pi) {
     sendStream(state, "streamFinal", stream).catch((error) => {
       console.warn(`[pi-notify-telegram] Cannot finalize stream: ${errorMessage(error)}`);
     });
+  });
+
+  pi.on("agent_settled", () => {
+    const state = clientStates.get(pi);
+    if (!state) return;
+    if (state.statusHeartbeat) clearTimeout(state.statusHeartbeat);
+    state.statusHeartbeat = undefined;
+    state.agentActivity = undefined;
   });
 }
 
@@ -1462,5 +1614,5 @@ module.exports = Object.freeze({
   attach,
   notify,
   runWakeDaemon,
-  __test: Object.freeze({ assistantText, findReplyTarget, formatWakeExitDetail, handleControlMessage, normalizePiCommands, pruneExpiredBrokerState, splitTelegramText, startLocalLeader, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStop }),
+  __test: Object.freeze({ assistantText, findReplyTarget, formatLiveStatus, formatWakeExitDetail, handleControlMessage, normalizePiCommands, pruneExpiredBrokerState, splitTelegramText, startLocalLeader, subagentProgress, summarizeToolArgs, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStop }),
 });

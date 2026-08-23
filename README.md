@@ -9,6 +9,7 @@ Each Pi session gets its own topic in the bot's private chat. Telegram replies a
 - One private Telegram topic per top-level Pi session
 - Subagent processes (`PI_SUBAGENT_CHILD=1`) stay inside their parent session and do not create topics
 - Native streaming assistant responses
+- Live main-agent turn/tool status, including `pi-subagents` child progress when available
 - Safe Markdown-to-Telegram-HTML rendering for headings, emphasis, code, links, quotes, spoilers, and lists
 - Notification replies become `pi.sendUserMessage()` input
 - Multiple concurrent Pi processes share one localhost broker and one `getUpdates` poller

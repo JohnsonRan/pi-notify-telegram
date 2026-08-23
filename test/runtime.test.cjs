@@ -74,6 +74,28 @@ test("formats bounded wake process diagnostics for Telegram", () => {
   assert.ok(detail.startsWith("…"));
 });
 
+test("formats live main-agent and subagent progress", () => {
+  assert.equal(runtime.__test.summarizeToolArgs("read", { path: "src/runtime.cjs" }), "src/runtime.cjs");
+  const text = runtime.__test.formatLiveStatus({
+    startedAt: 1_000,
+    turnIndex: 1,
+    toolName: "subagent",
+    toolArgs: { workflowScript: "return await runs.run(...)" },
+    partialResult: {
+      details: {
+        progress: [
+          { index: 0, agent: "scout", status: "completed" },
+          { index: 1, agent: "reviewer", status: "running", currentTool: "bash", currentPath: "test" },
+        ],
+      },
+    },
+  }, 13_500);
+  assert.match(text, /Main agent · Turn 2 · 12s/);
+  assert.match(text, /Subagents · 1\/2 done · 1 running/);
+  assert.match(text, /✓ scout · completed/);
+  assert.match(text, /⏳ reviewer · bash · test/);
+});
+
 test("maps Pi command names to Telegram-safe aliases and restores them", () => {
   const commands = runtime.__test.normalizePiCommands([
     { name: "review", description: "Review code", source: "extension" },
@@ -256,10 +278,23 @@ async function emit(pi, event, payload, ctx) {
 
   const start = { role: "assistant", content: [] };
   const partial = { role: "assistant", content: [{ type: "text", text: "Streaming hello" }] };
+  await emit(pi1, "agent_start", {}, ctx1);
+  await emit(pi1, "turn_start", { turnIndex: 0, timestamp: Date.now() }, ctx1);
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  await emit(pi1, "tool_execution_start", { toolCallId: "sub-1", toolName: "subagent", args: { agent: "reviewer", task: "review it" } }, ctx1);
+  await emit(pi1, "tool_execution_update", {
+    toolCallId: "sub-1",
+    toolName: "subagent",
+    args: { agent: "reviewer", task: "review it" },
+    partialResult: { details: { progress: [{ index: 0, agent: "reviewer", status: "running", currentTool: "read", currentPath: "src/runtime.cjs" }] } },
+  }, ctx1);
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  await emit(pi1, "tool_execution_end", { toolCallId: "sub-1", toolName: "subagent", result: {}, isError: false }, ctx1);
   await emit(pi1, "message_start", { message: start }, ctx1);
   await emit(pi1, "message_update", { message: partial }, ctx1);
   await new Promise((resolve) => setTimeout(resolve, 350));
   await emit(pi1, "message_end", { message: partial }, ctx1);
+  await emit(pi1, "agent_settled", {}, ctx1);
 
   await Promise.all([
     runtime.notify(pi1, ctx1, { sessionId: "session-one", cwd: ctx1.cwd }, "Question <one>", "Reply **one**"),
@@ -301,6 +336,8 @@ async function emit(pi, event, payload, ctx) {
   assert.equal(result.mappings, 0);
   assert.equal(result.pendingReplies, 0);
   assert.ok(result.notificationMessages.some((message) => message.parse_mode === "HTML" && message.link_preview_options?.is_disabled === true && message.text.includes("<b>Question &lt;one&gt;</b>") && message.text.includes("Reply <b>one</b>")));
+  assert.ok(result.drafts.some((draft) => draft.text.includes("Main agent · Turn 1")));
+  assert.ok(result.drafts.some((draft) => draft.text.includes("Subagents · 0/1 done · 1 running") && draft.text.includes("reviewer · read · src/runtime.cjs")));
   assert.ok(result.drafts.some((draft) => draft.parse_mode === "HTML" && draft.text === "Streaming hello"));
   assert.ok(result.finalMessages.some((message) => message.parse_mode === "HTML" && message.link_preview_options?.is_disabled === true && message.text === "Streaming hello"));
   assert.ok(result.botCommandMenus.some((commands) => commands.some((command) => command.command === "new")));
