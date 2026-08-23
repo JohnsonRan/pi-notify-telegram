@@ -105,8 +105,11 @@ test("builds Telegram control panels with inline buttons", () => {
   assert.deepEqual(status.replyMarkup.inline_keyboard[0].map((item) => item.callback_data), ["control:status", "control:sessions"]);
   const sessions = runtime.__test.controlPanel(state, "sessions");
   assert.match(sessions.text, /Demo · session-/);
+  assert.equal(sessions.replyMarkup.inline_keyboard[0][0].callback_data, "restore:session-id");
   assert.equal(runtime.__test.parseControlCallback("control:help"), "help");
   assert.equal(runtime.__test.parseControlCallback("control:unknown"), undefined);
+  assert.equal(runtime.__test.parseRestoreCallback("restore:12345678-1234-1234-1234-123456789abc"), "12345678-1234-1234-1234-123456789abc");
+  assert.equal(runtime.__test.parseRestoreCallback("restore:session-id"), undefined);
 });
 
 test("answers and applies authorized Telegram control callbacks", async () => {
@@ -123,7 +126,13 @@ test("answers and applies authorized Telegram control callbacks", async () => {
     clientsBySession: new Map(),
     secret: { botToken: `123456:${"a".repeat(32)}`, chatId: 42, allowedUserId: 7, wakeOpenTerminal: false },
     wakeLauncher: { runningSessionIds: () => [] },
-    topics: new Map(),
+    topics: new Map([["12345678-1234-1234-1234-123456789abc", {
+      sessionId: "12345678-1234-1234-1234-123456789abc",
+      threadId: 77,
+      name: "Demo · 12345678",
+      cwd: "C:\\Demo",
+      createdAt: 1,
+    }]]),
   };
   try {
     await runtime.__test.handleCallbackQuery(state, {
@@ -138,13 +147,27 @@ test("answers and applies authorized Telegram control callbacks", async () => {
       from: { id: 8 },
       message: { message_id: 99, chat: { id: 42 } },
     });
+    await runtime.__test.handleCallbackQuery(state, {
+      id: "callback-3",
+      data: "restore:12345678-1234-1234-1234-123456789abc",
+      from: { id: 7 },
+      message: { message_id: 99, chat: { id: 42 } },
+    });
   } finally {
     global.fetch = originalFetch;
   }
-  assert.deepEqual(calls.map((call) => call.method), ["answerCallbackQuery", "editMessageText", "answerCallbackQuery"]);
+  assert.deepEqual(calls.map((call) => call.method), [
+    "answerCallbackQuery",
+    "editMessageText",
+    "answerCallbackQuery",
+    "answerCallbackQuery",
+    "sendMessage",
+  ]);
   assert.equal(calls[1].body.message_id, 99);
   assert.equal(calls[1].body.reply_markup.inline_keyboard[0][0].callback_data, "control:status");
   assert.equal(calls[2].body.show_alert, true);
+  assert.equal(calls[4].body.message_thread_id, 77);
+  assert.match(calls[4].body.text, /Send a message in this topic to resume it on the host/);
 });
 
 test("formats bounded wake process diagnostics for Telegram", () => {
@@ -194,6 +217,7 @@ test("maps Pi command names to Telegram-safe aliases and restores them", () => {
 
 test("builds stable topic names, chunks text, and rejects unthreaded fallback routing", () => {
   assert.equal(runtime.__test.topicName("1234567890", "C:/work/demo", ""), "demo · 12345678");
+  assert.equal(runtime.__test.topicName("1234567890", "C:/work/demo", "demo · 12345678"), "demo · 12345678");
   const chunks = runtime.__test.splitTelegramText("x".repeat(9000));
   assert.ok(chunks.length >= 3);
   assert.ok(chunks.every((chunk) => chunk.length <= 4000));

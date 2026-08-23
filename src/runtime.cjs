@@ -92,13 +92,23 @@ function formatBrokerStatus(state, now = Date.now()) {
   ].join("\n");
 }
 
-function controlKeyboard(command) {
+function controlKeyboard(command, topics = []) {
   const button = (text, target) => ({ text, callback_data: `${CONTROL_CALLBACK_PREFIX}${target}` });
   if (command === "status") {
     return { inline_keyboard: [[button("Refresh", "status"), button("Sessions", "sessions")], [button("Help", "help")]] };
   }
   if (command === "sessions") {
-    return { inline_keyboard: [[button("Refresh", "sessions"), button("Status", "status")], [button("Help", "help")]] };
+    const sessionButtons = topics.map((topic) => [{
+      text: `Restore ${String(topic.name || topic.sessionId.slice(0, 8)).slice(0, 48)}`,
+      callback_data: `restore:${topic.sessionId}`,
+    }]);
+    return {
+      inline_keyboard: [
+        ...sessionButtons,
+        [button("Refresh", "sessions"), button("Status", "status")],
+        [button("Help", "help")],
+      ],
+    };
   }
   return { inline_keyboard: [[button("Status", "status"), button("Sessions", "sessions")]] };
 }
@@ -112,7 +122,7 @@ function controlPanel(state, command, now = Date.now()) {
     const text = topics.length === 0
       ? "No Pi session topics are known yet."
       : ["Known Pi sessions:", ...topics.map((topic) => `${topic.name || "Pi"} · ${topic.sessionId.slice(0, 8)} · ${topic.cwd || "no cwd"}`)].join("\n");
-    return { text, replyMarkup: controlKeyboard(command) };
+    return { text, replyMarkup: controlKeyboard(command, topics) };
   }
   return {
     text: [
@@ -132,6 +142,11 @@ function parseControlCallback(value) {
   if (!text.startsWith(CONTROL_CALLBACK_PREFIX)) return undefined;
   const command = text.slice(CONTROL_CALLBACK_PREFIX.length);
   return CONTROL_PANEL_COMMANDS.has(command) ? command : undefined;
+}
+
+function parseRestoreCallback(value) {
+  const match = String(value || "").match(/^restore:([0-9a-f-]{36})$/i);
+  return match?.[1];
 }
 
 function formatWakeExitDetail(stderr) {
@@ -376,8 +391,9 @@ function pruneExpiredBrokerState(state, now = Date.now()) {
 }
 
 function topicName(sessionId, cwd, sessionName) {
-  const base = String(sessionName || path.basename(String(cwd || "")) || "Pi").replace(/[\r\n\u0000-\u001f]+/g, " ").trim();
-  return `${base || "Pi"} · ${String(sessionId).slice(0, 8)}`.slice(0, 128);
+  const base = String(sessionName || path.basename(String(cwd || "")) || "Pi").replace(/[\r\n\u0000-\u001f]+/g, " ").trim() || "Pi";
+  const suffix = ` · ${String(sessionId).slice(0, 8)}`;
+  return (base.endsWith(suffix) ? base : `${base}${suffix}`).slice(0, 128);
 }
 
 async function ensureTopic(state, sessionId, cwd, sessionName) {
@@ -745,13 +761,37 @@ async function handleCallbackQuery(state, query) {
   if (!query || typeof query.id !== "string") return;
   const authorized = query.message?.chat?.id === state.secret.chatId && query.from?.id === state.secret.allowedUserId;
   const command = authorized ? parseControlCallback(query.data) : undefined;
+  const restoreSessionId = authorized ? parseRestoreCallback(query.data) : undefined;
+  const restoreTopic = restoreSessionId ? state.topics.get(restoreSessionId) : undefined;
   await telegramCall(state.secret, "answerCallbackQuery", {
     callback_query_id: query.id,
     ...(!authorized ? { text: "Not allowed.", show_alert: true } : {}),
-    ...(authorized && !command ? { text: "This button is no longer available." } : {}),
+    ...(authorized && !command && !restoreTopic ? { text: "This button is no longer available." } : {}),
+    ...(restoreTopic ? { text: `Restoring ${restoreTopic.name || restoreTopic.sessionId.slice(0, 8)}…` } : {}),
   }).catch((error) => console.warn(`[pi-notify-telegram] Cannot answer callback: ${errorMessage(error)}`));
-  if (!authorized || !command || !Number.isSafeInteger(query.message?.message_id)) return;
+  if (!authorized) return;
 
+  if (restoreTopic) {
+    try {
+      await withTopicRetry(
+        state,
+        restoreTopic.sessionId,
+        restoreTopic.cwd,
+        restoreTopic.name,
+        (topic) => sendBrokerText(state, [
+          `Restored Pi session ${topic.sessionId.slice(0, 8)}.`,
+          "Send a message in this topic to resume it on the host.",
+        ].join("\n"), { threadId: topic.threadId }),
+      );
+    } catch (error) {
+      await sendBrokerText(state, `Could not restore Pi session: ${errorMessage(error)}`, {
+        ...(Number.isSafeInteger(query.message?.message_thread_id) ? { threadId: query.message.message_thread_id } : {}),
+      }).catch(() => {});
+    }
+    return;
+  }
+
+  if (!command || !Number.isSafeInteger(query.message?.message_id)) return;
   const panel = controlPanel(state, command);
   await telegramCall(state.secret, "editMessageText", {
     chat_id: state.secret.chatId,
@@ -1722,5 +1762,5 @@ module.exports = Object.freeze({
   attach,
   notify,
   runWakeDaemon,
-  __test: Object.freeze({ assistantText, controlKeyboard, controlPanel, findReplyTarget, formatBrokerStatus, formatDuration, formatLiveStatus, formatWakeExitDetail, handleCallbackQuery, handleControlMessage, normalizePiCommands, parseControlCallback, pruneExpiredBrokerState, splitTelegramText, startLocalLeader, subagentProgress, summarizeToolArgs, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStability, waitForWakeStop }),
+  __test: Object.freeze({ assistantText, controlKeyboard, controlPanel, findReplyTarget, formatBrokerStatus, formatDuration, formatLiveStatus, formatWakeExitDetail, handleCallbackQuery, handleControlMessage, normalizePiCommands, parseControlCallback, parseRestoreCallback, pruneExpiredBrokerState, splitTelegramText, startLocalLeader, subagentProgress, summarizeToolArgs, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStability, waitForWakeStop }),
 });
