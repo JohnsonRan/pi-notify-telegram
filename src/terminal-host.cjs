@@ -2,6 +2,7 @@
 
 const { spawn } = require("node:child_process");
 const { existsSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const readline = require("node:readline/promises");
 
 let cancelPath;
 let pidPath;
@@ -12,6 +13,16 @@ function writeResult(result) {
   try {
     writeFileSync(resultPath, JSON.stringify(result), { mode: 0o600 });
   } catch {}
+}
+
+async function waitForEnterAfterError(input = process.stdin, output = process.stderr) {
+  if (!input.isTTY) return;
+  const terminal = readline.createInterface({ input, output });
+  try {
+    await terminal.question("\nAn error occurred. Press Enter to close this terminal...");
+  } catch {} finally {
+    terminal.close();
+  }
 }
 
 function readSpec() {
@@ -36,6 +47,7 @@ function readSpec() {
 
 async function main() {
   let cancelTimer;
+  let cancellationRequested = false;
   try {
     const spec = readSpec();
     const child = spawn(spec.command, spec.args.map(String), {
@@ -47,17 +59,24 @@ async function main() {
     const stopChild = () => {
       if (!child.killed) child.kill("SIGTERM");
     };
-    process.once("SIGINT", stopChild);
-    process.once("SIGTERM", stopChild);
+    const cancelChild = () => {
+      cancellationRequested = true;
+      stopChild();
+    };
+    process.once("SIGINT", cancelChild);
+    process.once("SIGTERM", cancelChild);
     cancelTimer = setInterval(() => {
-      if (cancelPath && existsSync(cancelPath)) stopChild();
+      if (cancelPath && existsSync(cancelPath)) {
+        cancellationRequested = true;
+        stopChild();
+      }
     }, 250);
     const result = await new Promise((resolve, reject) => {
       child.once("error", reject);
       child.once("exit", (code, signal) => resolve({ code, signal }));
     });
-    process.off("SIGINT", stopChild);
-    process.off("SIGTERM", stopChild);
+    process.off("SIGINT", cancelChild);
+    process.off("SIGTERM", cancelChild);
     writeResult(result);
     if (result.signal) {
       process.stderr.write(`Pi exited from signal ${result.signal}.\n`);
@@ -65,17 +84,27 @@ async function main() {
     } else {
       process.exitCode = Number.isInteger(result.code) ? result.code : 1;
     }
+    if (process.exitCode !== 0 && !cancellationRequested) await waitForEnterAfterError();
   } catch (error) {
     const detail = error instanceof Error ? error.stack || error.message : String(error);
     writeResult({ code: 1, signal: null, error: detail });
-    throw error;
+    process.stderr.write(`${detail}\n`);
+    process.exitCode = 1;
+    await waitForEnterAfterError();
   } finally {
     if (cancelTimer) clearInterval(cancelTimer);
     if (pidPath) rmSync(pidPath, { force: true });
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.stack || error.message : String(error)}\n`);
-  process.exitCode = 1;
+if (require.main === module) {
+  main().catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.stack || error.message : String(error)}\n`);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = Object.freeze({
+  main,
+  waitForEnterAfterError,
 });

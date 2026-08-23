@@ -3,8 +3,10 @@ const { spawnSync } = require("node:child_process");
 const { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { PassThrough } = require("node:stream");
 const test = require("node:test");
 
+const { waitForEnterAfterError } = require("../src/terminal-host.cjs");
 const { createTerminalLaunch, shellQuote } = require("../src/terminal.cjs");
 
 test("builds a Windows console launch around the terminal host", () => {
@@ -95,6 +97,26 @@ test("terminal host runs Pi with the stored cwd and environment", () => {
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("terminal host waits for Enter after an interactive error", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  input.isTTY = true;
+  output.isTTY = true;
+
+  const waiting = waitForEnterAfterError(input, output);
+  input.write("\n");
+  await waiting;
+
+  assert.match(output.read().toString(), /Press Enter to close this terminal/);
+});
+
+test("terminal host does not wait without an interactive terminal", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  await waitForEnterAfterError(input, output);
+  assert.equal(output.read(), null);
 });
 
 test("returns a fallback reason without a Linux desktop or terminal", () => {
