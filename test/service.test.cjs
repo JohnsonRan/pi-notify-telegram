@@ -10,12 +10,20 @@ test("builds a quoted Windows Scheduled Task command", () => {
   );
 });
 
-test("builds a supervised unlimited-runtime Windows task", () => {
-  const task = windowsTaskXml("C:\\node.exe", "C:\\Pi\\daemon.cjs", "DESKTOP\\User");
+test("builds a hidden supervised unlimited-runtime Windows task", () => {
+  const task = windowsTaskXml(
+    "C:\\node.exe",
+    "C:\\Pi\\daemon.cjs",
+    "DESKTOP\\User",
+    "C:\\Windows\\System32\\wscript.exe",
+    "C:\\Pi\\daemon-windows.vbs",
+  );
   assert.match(task, /<ExecutionTimeLimit>PT0S<\/ExecutionTimeLimit>/);
   assert.match(task, /<RestartOnFailure><Interval>PT1M<\/Interval><Count>999<\/Count><\/RestartOnFailure>/);
   assert.match(task, /<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/);
   assert.match(task, /<LogonType>InteractiveToken<\/LogonType>/);
+  assert.match(task, /<Command>C:\\Windows\\System32\\wscript\.exe<\/Command>/);
+  assert.match(task, /\/\/B \/\/NoLogo &quot;C:\\Pi\\daemon-windows\.vbs&quot; &quot;C:\\node\.exe&quot; &quot;C:\\Pi\\daemon\.cjs&quot;/);
 });
 
 test("builds a restartable Linux systemd user unit", () => {
