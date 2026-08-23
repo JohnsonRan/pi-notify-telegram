@@ -90,6 +90,63 @@ test("formats broker diagnostics for Telegram status", () => {
   assert.match(text, /Known topics: 3/);
 });
 
+test("builds Telegram control panels with inline buttons", () => {
+  const state = {
+    pid: 123,
+    packageVersion: "1.0.0",
+    startedAt: 1_000,
+    clientsBySession: new Map(),
+    secret: { wakeOpenTerminal: false },
+    wakeLauncher: { runningSessionIds: () => [] },
+    topics: new Map([["session-id", { sessionId: "session-id", name: "Demo", cwd: "C:\\Demo", createdAt: 1 }]]),
+  };
+  const status = runtime.__test.controlPanel(state, "status", 2_000);
+  assert.match(status.text, /Broker PID: 123/);
+  assert.deepEqual(status.replyMarkup.inline_keyboard[0].map((item) => item.callback_data), ["control:status", "control:sessions"]);
+  const sessions = runtime.__test.controlPanel(state, "sessions");
+  assert.match(sessions.text, /Demo · session-/);
+  assert.equal(runtime.__test.parseControlCallback("control:help"), "help");
+  assert.equal(runtime.__test.parseControlCallback("control:unknown"), undefined);
+});
+
+test("answers and applies authorized Telegram control callbacks", async () => {
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url, options) => {
+    calls.push({ method: url.split("/").pop(), body: JSON.parse(options.body) });
+    return { ok: true, status: 200, json: async () => ({ ok: true, result: true }) };
+  };
+  const state = {
+    pid: 123,
+    packageVersion: "1.0.0",
+    startedAt: Date.now(),
+    clientsBySession: new Map(),
+    secret: { botToken: `123456:${"a".repeat(32)}`, chatId: 42, allowedUserId: 7, wakeOpenTerminal: false },
+    wakeLauncher: { runningSessionIds: () => [] },
+    topics: new Map(),
+  };
+  try {
+    await runtime.__test.handleCallbackQuery(state, {
+      id: "callback-1",
+      data: "control:status",
+      from: { id: 7 },
+      message: { message_id: 99, chat: { id: 42 } },
+    });
+    await runtime.__test.handleCallbackQuery(state, {
+      id: "callback-2",
+      data: "control:status",
+      from: { id: 8 },
+      message: { message_id: 99, chat: { id: 42 } },
+    });
+  } finally {
+    global.fetch = originalFetch;
+  }
+  assert.deepEqual(calls.map((call) => call.method), ["answerCallbackQuery", "editMessageText", "answerCallbackQuery"]);
+  assert.equal(calls[1].body.message_id, 99);
+  assert.equal(calls[1].body.reply_markup.inline_keyboard[0][0].callback_data, "control:status");
+  assert.equal(calls[2].body.show_alert, true);
+});
+
 test("formats bounded wake process diagnostics for Telegram", () => {
   assert.equal(runtime.__test.formatWakeExitDetail("\u001b[31mconfig failed\u001b[0m\n"), "config failed");
   const detail = runtime.__test.formatWakeExitDetail("x".repeat(2000));

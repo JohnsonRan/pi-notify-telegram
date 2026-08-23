@@ -54,6 +54,8 @@ const CONTROL_COMMANDS = Object.freeze([
   { command: "status", description: "Show the Pi wake broker status" },
   { command: "help", description: "Show Telegram wake commands" },
 ]);
+const CONTROL_CALLBACK_PREFIX = "control:";
+const CONTROL_PANEL_COMMANDS = new Set(["help", "sessions", "status"]);
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
@@ -88,6 +90,48 @@ function formatBrokerStatus(state, now = Date.now()) {
     `Wake Pi sessions: ${state.wakeLauncher.runningSessionIds().length}`,
     `Known topics: ${state.topics.size}`,
   ].join("\n");
+}
+
+function controlKeyboard(command) {
+  const button = (text, target) => ({ text, callback_data: `${CONTROL_CALLBACK_PREFIX}${target}` });
+  if (command === "status") {
+    return { inline_keyboard: [[button("Refresh", "status"), button("Sessions", "sessions")], [button("Help", "help")]] };
+  }
+  if (command === "sessions") {
+    return { inline_keyboard: [[button("Refresh", "sessions"), button("Status", "status")], [button("Help", "help")]] };
+  }
+  return { inline_keyboard: [[button("Status", "status"), button("Sessions", "sessions")]] };
+}
+
+function controlPanel(state, command, now = Date.now()) {
+  if (command === "status") {
+    return { text: formatBrokerStatus(state, now), replyMarkup: controlKeyboard(command) };
+  }
+  if (command === "sessions") {
+    const topics = [...state.topics.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 20);
+    const text = topics.length === 0
+      ? "No Pi session topics are known yet."
+      : ["Known Pi sessions:", ...topics.map((topic) => `${topic.name || "Pi"} · ${topic.sessionId.slice(0, 8)} · ${topic.cwd || "no cwd"}`)].join("\n");
+    return { text, replyMarkup: controlKeyboard(command) };
+  }
+  return {
+    text: [
+      "Pi Telegram wake commands:",
+      "/new <cwd> | <prompt> — create and run a session",
+      "/new <cwd> — create a session topic without running it",
+      "/new | <prompt> — use wakeDefaultCwd",
+      "/sessions — list known session topics",
+      "/status — show broker status",
+    ].join("\n"),
+    replyMarkup: controlKeyboard("help"),
+  };
+}
+
+function parseControlCallback(value) {
+  const text = String(value || "");
+  if (!text.startsWith(CONTROL_CALLBACK_PREFIX)) return undefined;
+  const command = text.slice(CONTROL_CALLBACK_PREFIX.length);
+  return CONTROL_PANEL_COMMANDS.has(command) ? command : undefined;
 }
 
 function formatWakeExitDetail(stderr) {
@@ -463,6 +507,7 @@ async function sendBrokerText(state, text, options = {}) {
     link_preview_options: { is_disabled: true },
     ...(Number.isSafeInteger(options.threadId) ? { message_thread_id: options.threadId } : {}),
     ...(Number.isSafeInteger(options.replyTo) ? { reply_to_message_id: options.replyTo } : {}),
+    ...(options.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
   });
 }
 
@@ -578,27 +623,9 @@ async function handleControlMessage(state, message) {
     await sendBrokerText(state, "Use /new, /sessions, /status, or /help in All Topics.", replyOptions);
     return;
   }
-  if (parsed.command === "help") {
-    await sendBrokerText(state, [
-      "Pi Telegram wake commands:",
-      "/new <cwd> | <prompt> — create and run a session",
-      "/new <cwd> — create a session topic without running it",
-      "/new | <prompt> — use wakeDefaultCwd",
-      "/sessions — list known session topics",
-      "/status — show broker status",
-    ].join("\n"), replyOptions);
-    return;
-  }
-  if (parsed.command === "status") {
-    await sendBrokerText(state, formatBrokerStatus(state), replyOptions);
-    return;
-  }
-  if (parsed.command === "sessions") {
-    const topics = [...state.topics.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 20);
-    const text = topics.length === 0
-      ? "No Pi session topics are known yet."
-      : ["Known Pi sessions:", ...topics.map((topic) => `${topic.name || "Pi"} · ${topic.sessionId.slice(0, 8)} · ${topic.cwd || "no cwd"}`)].join("\n");
-    await sendBrokerText(state, text, replyOptions);
+  if (CONTROL_PANEL_COMMANDS.has(parsed.command)) {
+    const panel = controlPanel(state, parsed.command);
+    await sendBrokerText(state, panel.text, { ...replyOptions, replyMarkup: panel.replyMarkup });
     return;
   }
 
@@ -714,18 +741,44 @@ async function handleTelegramMessage(state, message) {
   }
 }
 
+async function handleCallbackQuery(state, query) {
+  if (!query || typeof query.id !== "string") return;
+  const authorized = query.message?.chat?.id === state.secret.chatId && query.from?.id === state.secret.allowedUserId;
+  const command = authorized ? parseControlCallback(query.data) : undefined;
+  await telegramCall(state.secret, "answerCallbackQuery", {
+    callback_query_id: query.id,
+    ...(!authorized ? { text: "Not allowed.", show_alert: true } : {}),
+    ...(authorized && !command ? { text: "This button is no longer available." } : {}),
+  }).catch((error) => console.warn(`[pi-notify-telegram] Cannot answer callback: ${errorMessage(error)}`));
+  if (!authorized || !command || !Number.isSafeInteger(query.message?.message_id)) return;
+
+  const panel = controlPanel(state, command);
+  await telegramCall(state.secret, "editMessageText", {
+    chat_id: state.secret.chatId,
+    message_id: query.message.message_id,
+    text: panel.text,
+    link_preview_options: { is_disabled: true },
+    reply_markup: panel.replyMarkup,
+  }).catch((error) => {
+    if (!/message is not modified/i.test(errorMessage(error))) {
+      console.warn(`[pi-notify-telegram] Cannot update control panel: ${errorMessage(error)}`);
+    }
+  });
+}
+
 async function pollTelegram(state) {
   while (!state.closed) {
     try {
       const updates = await telegramCall(state.secret, "getUpdates", {
         offset: state.offset,
         timeout: 25,
-        allowed_updates: ["message"],
+        allowed_updates: ["message", "callback_query"],
       }, 35_000);
       for (const update of updates) {
         if (!Number.isSafeInteger(update?.update_id)) continue;
         state.offset = Math.max(state.offset, update.update_id + 1);
-        await handleTelegramMessage(state, update.message);
+        if (update.message) await handleTelegramMessage(state, update.message);
+        if (update.callback_query) await handleCallbackQuery(state, update.callback_query);
       }
       if (updates.length > 0) await queuePersist(state);
     } catch (error) {
@@ -1669,5 +1722,5 @@ module.exports = Object.freeze({
   attach,
   notify,
   runWakeDaemon,
-  __test: Object.freeze({ assistantText, findReplyTarget, formatBrokerStatus, formatDuration, formatLiveStatus, formatWakeExitDetail, handleControlMessage, normalizePiCommands, pruneExpiredBrokerState, splitTelegramText, startLocalLeader, subagentProgress, summarizeToolArgs, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStability, waitForWakeStop }),
+  __test: Object.freeze({ assistantText, controlKeyboard, controlPanel, findReplyTarget, formatBrokerStatus, formatDuration, formatLiveStatus, formatWakeExitDetail, handleCallbackQuery, handleControlMessage, normalizePiCommands, parseControlCallback, pruneExpiredBrokerState, splitTelegramText, startLocalLeader, subagentProgress, summarizeToolArgs, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStability, waitForWakeStop }),
 });

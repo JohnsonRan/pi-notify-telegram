@@ -141,6 +141,8 @@ All Topics is command-only:
 /help
 ```
 
+The `/help`, `/status`, and `/sessions` responses include inline buttons for switching between the control views and refreshing live status without typing another command. Callback actions are restricted to the configured chat and allowed user.
+
 Messages in an existing session topic wake that exact session. Ordinary unthreaded text never falls back to a globally "latest" session.
 
 ## Pi command menu
