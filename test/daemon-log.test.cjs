@@ -5,6 +5,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const { daemonLogPath, installDaemonLogging } = require("../src/daemon-log.cjs");
+const { formatLocalTimestamp } = require("../src/time.cjs");
 
 test("writes bounded daemon diagnostics", () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "pi-telegram-log-test-"));
@@ -16,13 +17,15 @@ test("writes bounded daemon diagnostics", () => {
     error: (...args) => captured.push(["error", ...args]),
   };
   try {
+    const timestamp = new Date("2026-01-02T03:04:05.000Z");
     installDaemonLogging({
       logPath,
       maxBytes: 96,
       consoleObject,
-      now: () => new Date("2026-01-02T03:04:05.000Z"),
+      now: () => timestamp,
     });
     consoleObject.log("started", { pid: 42 });
+    assert.ok(readFileSync(logPath, "utf8").startsWith(`${formatLocalTimestamp(timestamp)} [info] `));
     consoleObject.warn("x".repeat(160));
 
     const content = readFileSync(logPath, "utf8");

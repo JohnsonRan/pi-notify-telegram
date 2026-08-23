@@ -1,6 +1,7 @@
 const { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } = require("node:fs");
 const path = require("node:path");
 const { format } = require("node:util");
+const { formatLocalTimestamp } = require("./time.cjs");
 
 const DEFAULT_MAX_BYTES = 256 * 1024;
 
@@ -33,7 +34,7 @@ function installDaemonLogging(options = {}) {
 
   const write = (level, args) => {
     const marker = Buffer.from("[earlier daemon output truncated]\n");
-    const prefix = `${now().toISOString()} [${level}] `;
+    const prefix = `${formatLocalTimestamp(now())} [${level}] `;
     let message = format(...args);
     const lineBudget = Math.max(1, maxBytes - marker.length);
     if (Buffer.byteLength(`${prefix}${message}\n`) > lineBudget) {
