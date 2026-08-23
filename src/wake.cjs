@@ -1,6 +1,40 @@
-const { spawn } = require("node:child_process");
-const { realpath, stat } = require("node:fs/promises");
+const { execFile, spawn } = require("node:child_process");
+const { randomUUID } = require("node:crypto");
+const { readFileSync, writeFileSync } = require("node:fs");
+const { mkdir, readdir, realpath, stat, unlink, writeFile } = require("node:fs/promises");
+const os = require("node:os");
 const path = require("node:path");
+const { createTerminalLaunch } = require("./terminal.cjs");
+const { wakePromptArgument } = require("./wake-payload.cjs");
+
+const MAX_STDERR_BYTES = 8 * 1024;
+const TERMINAL_HOST_PATH = path.join(__dirname, "terminal-host.cjs");
+const TERMINAL_SPEC_MAX_AGE_MS = 60 * 60 * 1000;
+
+async function prepareTerminalSpecDir(directory) {
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+  const cutoff = Date.now() - TERMINAL_SPEC_MAX_AGE_MS;
+  await Promise.all(entries
+    .filter((entry) => entry.isFile() && entry.name.startsWith("wake-"))
+    .map(async (entry) => {
+      const file = path.join(directory, entry.name);
+      const info = await stat(file).catch(() => undefined);
+      if (info && info.mtimeMs < cutoff) await unlink(file).catch(() => {});
+    }));
+}
+
+function killWindowsProcessTree(pid) {
+  const child = execFile("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true }, () => {});
+  child.unref?.();
+}
+
+function appendBoundedText(current, chunk, maxBytes = MAX_STDERR_BYTES) {
+  const combined = `${current}${String(chunk)}`;
+  const bytes = Buffer.from(combined, "utf8");
+  if (bytes.length <= maxBytes) return combined;
+  return bytes.subarray(bytes.length - maxBytes).toString("utf8").replace(/^\uFFFD+/, "");
+}
 
 function parseControlCommand(value) {
   const text = String(value || "").trim();
@@ -47,6 +81,16 @@ class WakeLauncher {
     this.piCommand = String(options.piCommand || "pi");
     this.piCommandArgs = Array.isArray(options.piCommandArgs) ? [...options.piCommandArgs] : [];
     this.spawn = options.spawn || spawn;
+    this.openTerminal = options.openTerminal === true;
+    this.platform = String(options.platform || process.platform);
+    this.nodeCommand = options.nodeCommand;
+    this.terminalHostPath = options.terminalHostPath;
+    this.terminalSpecDir = String(options.terminalSpecDir || path.join(os.tmpdir(), "pi-notify-telegram"));
+    this.powershell = options.powershell;
+    this.osascript = options.osascript;
+    this.terminalEnvironment = options.terminalEnvironment || process.env;
+    this.findExecutable = options.findExecutable;
+    this.killTree = typeof options.killTree === "function" ? options.killTree : killWindowsProcessTree;
     this.running = new Map();
     this.cancelled = new Set();
     this.onExit = typeof options.onExit === "function" ? options.onExit : () => {};
@@ -64,56 +108,145 @@ class WakeLauncher {
     const child = this.running.get(sessionId);
     if (!child) return false;
     this.cancelled.add(sessionId);
-    child.kill();
+    if (child.terminalCancelPath) {
+      try { writeFileSync(child.terminalCancelPath, "cancel\n", { mode: 0o600 }); } catch {}
+    }
+    let terminalPid;
+    try {
+      terminalPid = Number(readFileSync(child.terminalPidPath, "utf8"));
+    } catch {}
+    if (Number.isInteger(terminalPid) && terminalPid > 0) {
+      if (this.platform === "win32") this.killTree(terminalPid);
+      else {
+        try { process.kill(terminalPid, "SIGTERM"); } catch { child.kill(); }
+      }
+    } else if (this.openTerminal && this.platform === "win32" && Number.isInteger(child.pid)) {
+      this.killTree(child.pid);
+    } else {
+      child.kill();
+    }
     return true;
   }
 
-  async launch({ sessionId, cwd, sessionName, prompt, expandPromptTemplates = true }) {
+  async launch({ sessionId, cwd, sessionName, prompt, openTerminal = this.openTerminal }) {
     if (this.running.has(sessionId)) return { started: false, process: this.running.get(sessionId) };
-    const args = [
+    const commonArgs = [
       ...this.piCommandArgs,
       "--session-id", sessionId,
       "--name", String(sessionName || path.basename(cwd) || "Telegram"),
-      "--print",
-      "--approve",
-      "/telegram-wake",
     ];
+    const interactiveArgs = [...commonArgs, "--approve", wakePromptArgument(prompt)];
+    const backgroundArgs = [...commonArgs, "--print", "--approve", wakePromptArgument(prompt)];
     const wakePayload = Buffer.from(JSON.stringify({
       text: String(prompt || ""),
-      expandPromptTemplates: expandPromptTemplates === true,
+      expandPromptTemplates: true,
     }), "utf8").toString("base64url");
-    const child = this.spawn(this.piCommand, args, {
+    const wakeEnv = {
+      ...process.env,
+      PI_TELEGRAM_WAKE_CHILD: "1",
+      PI_TELEGRAM_WAKE_PAYLOAD: wakePayload,
+    };
+    let launch = { command: this.piCommand, args: backgroundArgs, windowsHide: true };
+    let foreground = false;
+    let fallbackReason;
+    let terminal;
+    let terminalSpecPath;
+    if (openTerminal) {
+      await prepareTerminalSpecDir(this.terminalSpecDir);
+      terminalSpecPath = path.join(this.terminalSpecDir, `wake-${process.pid}-${randomUUID()}.json`);
+      const terminalLaunch = createTerminalLaunch(terminalSpecPath, {
+        platform: this.platform,
+        nodeCommand: this.nodeCommand,
+        terminalHostPath: this.terminalHostPath || TERMINAL_HOST_PATH,
+        powershell: this.powershell,
+        osascript: this.osascript,
+        display: this.terminalEnvironment.DISPLAY,
+        waylandDisplay: this.terminalEnvironment.WAYLAND_DISPLAY,
+        environmentPath: this.terminalEnvironment.PATH,
+        findExecutable: this.findExecutable,
+      });
+      if (terminalLaunch.reason) {
+        fallbackReason = terminalLaunch.reason;
+        terminalSpecPath = undefined;
+      } else {
+        await writeFile(terminalSpecPath, JSON.stringify({
+          command: this.piCommand,
+          args: interactiveArgs,
+          cwd,
+          env: wakeEnv,
+          cancelPath: `${terminalSpecPath}.cancel`,
+          resultPath: `${terminalSpecPath}.result`,
+        }), { mode: 0o600 });
+        launch = terminalLaunch;
+        foreground = true;
+        terminal = terminalLaunch.terminal;
+      }
+    }
+    const child = this.spawn(launch.command, launch.args, {
       cwd,
-      env: {
-        ...process.env,
-        PI_TELEGRAM_WAKE_CHILD: "1",
-        PI_TELEGRAM_WAKE_PAYLOAD: wakePayload,
-      },
-      stdio: "ignore",
-      windowsHide: true,
+      env: { ...wakeEnv, ...(launch.env || {}) },
+      stdio: ["ignore", "ignore", "pipe"],
+      windowsHide: launch.windowsHide,
+    });
+    if (terminalSpecPath) {
+      child.terminalPidPath = `${terminalSpecPath}.pid`;
+      child.terminalCancelPath = `${terminalSpecPath}.cancel`;
+      child.terminalResultPath = `${terminalSpecPath}.result`;
+    }
+    let stderr = "";
+    child.stderr?.setEncoding?.("utf8");
+    child.stderr?.on?.("data", (chunk) => {
+      stderr = appendBoundedText(stderr, chunk);
     });
     this.running.set(sessionId, child);
+    let spawned = false;
+    child.once("close", (code, signal) => {
+      if (!spawned) return;
+      let terminalResult;
+      try { terminalResult = JSON.parse(readFileSync(child.terminalResultPath, "utf8")); } catch {}
+      const effectiveCode = Number.isInteger(terminalResult?.code) ? terminalResult.code : code;
+      const effectiveSignal = terminalResult?.signal || signal;
+      if (terminalResult?.error) stderr = appendBoundedText(stderr, `\n${terminalResult.error}`);
+      const cancelled = this.cancelled.delete(sessionId);
+      if (terminalSpecPath) {
+        unlink(terminalSpecPath).catch(() => {});
+        unlink(`${terminalSpecPath}.pid`).catch(() => {});
+        unlink(`${terminalSpecPath}.result`).catch(() => {});
+        const cancelCleanup = () => unlink(`${terminalSpecPath}.cancel`).catch(() => {});
+        if (cancelled) setTimeout(cancelCleanup, 30_000).unref?.();
+        else cancelCleanup();
+      }
+      if (this.running.get(sessionId) === child) this.running.delete(sessionId);
+      Promise.resolve(this.onExit({ sessionId, cwd, code: effectiveCode, signal: effectiveSignal, cancelled, stderr: stderr.trim() })).catch(() => {});
+    });
     try {
       await new Promise((resolve, reject) => {
-        child.once("spawn", resolve);
+        child.once("spawn", () => {
+          spawned = true;
+          resolve();
+        });
         child.once("error", reject);
       });
     } catch (error) {
-      this.running.delete(sessionId);
+      if (terminalSpecPath) {
+        await unlink(terminalSpecPath).catch(() => {});
+        await unlink(`${terminalSpecPath}.pid`).catch(() => {});
+        await unlink(`${terminalSpecPath}.cancel`).catch(() => {});
+        await unlink(`${terminalSpecPath}.result`).catch(() => {});
+      }
+      if (this.running.get(sessionId) === child) this.running.delete(sessionId);
       throw error;
     }
-    child.once("exit", (code, signal) => {
-      if (this.running.get(sessionId) === child) this.running.delete(sessionId);
-      const cancelled = this.cancelled.delete(sessionId);
-      Promise.resolve(this.onExit({ sessionId, cwd, code, signal, cancelled })).catch(() => {});
-    });
-    return { started: true, process: child };
+    return { started: true, process: child, foreground, fallbackReason, terminal };
   }
 }
 
 module.exports = Object.freeze({
   WakeLauncher,
+  appendBoundedText,
   isPathInside,
+  killWindowsProcessTree,
   parseControlCommand,
+  prepareTerminalSpecDir,
   resolveWakeCwd,
 });

@@ -1,11 +1,13 @@
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
-const { mkdtemp, mkdir, realpath, rm } = require("node:fs/promises");
+const { PassThrough } = require("node:stream");
+const { mkdtemp, mkdir, readFile, realpath, rm, writeFile } = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { WakeLauncher, parseControlCommand, resolveWakeCwd } = require("../src/wake.cjs");
+const { WakeLauncher, appendBoundedText, parseControlCommand, resolveWakeCwd } = require("../src/wake.cjs");
+const { decodeWakePayload, wakePromptArgument, WAKE_SENTINEL } = require("../src/wake-payload.cjs");
 
 test("parses General-topic wake commands", () => {
   assert.deepEqual(parseControlCommand("/new F:\\Work | inspect this"), {
@@ -31,6 +33,18 @@ test("resolves wake cwd only inside configured roots", async () => {
   }
 });
 
+test("decodes wake payloads and only exposes slash commands as CLI arguments", () => {
+  const encoded = Buffer.from(JSON.stringify({
+    text: "inspect this",
+    expandPromptTemplates: true,
+  }), "utf8").toString("base64url");
+  assert.deepEqual(decodeWakePayload(encoded), { text: "inspect this", expandPromptTemplates: true });
+  assert.equal(wakePromptArgument("inspect this"), WAKE_SENTINEL);
+  assert.equal(wakePromptArgument("--help"), WAKE_SENTINEL);
+  assert.equal(wakePromptArgument("@secret"), WAKE_SENTINEL);
+  assert.equal(wakePromptArgument("/review now"), "/review now");
+});
+
 test("launches one full-permission Pi process per session", async () => {
   const calls = [];
   let child;
@@ -39,6 +53,7 @@ test("launches one full-permission Pi process per session", async () => {
     spawn(command, args, options) {
       child = new EventEmitter();
       child.pid = 123;
+      child.stderr = new PassThrough();
       calls.push({ command, args, options });
       process.nextTick(() => child.emit("spawn"));
       return child;
@@ -50,22 +65,144 @@ test("launches one full-permission Pi process per session", async () => {
   assert.equal(second.started, false);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, "pi-test");
-  assert.deepEqual(calls[0].args, ["--session-id", "session-1", "--name", "Test", "--print", "--approve", "/telegram-wake"]);
+  assert.deepEqual(calls[0].args, ["--session-id", "session-1", "--name", "Test", "--print", "--approve", WAKE_SENTINEL]);
   assert.deepEqual(
     JSON.parse(Buffer.from(calls[0].options.env.PI_TELEGRAM_WAKE_PAYLOAD, "base64url").toString("utf8")),
     { text: "hello", expandPromptTemplates: true },
   );
   assert.equal(calls[0].options.windowsHide, true);
-  child.emit("exit", 0, null);
+  assert.deepEqual(calls[0].options.stdio, ["ignore", "ignore", "pipe"]);
+  child.emit("close", 0, null);
   assert.equal(launcher.isRunning("session-1"), false);
 
-  for (const prompt of ["--help", "--no-tools", "--session-id other", "@sensitive-file"]) {
+  for (const prompt of ["--help", "--no-tools", "--session-id other", "@sensitive-file", "/review now"]) {
     await launcher.launch({ sessionId: prompt, cwd: process.cwd(), sessionName: "Test", prompt });
-    assert.equal(calls.at(-1).args.at(-1), "/telegram-wake");
+    assert.equal(calls.at(-1).args.at(-1), prompt.startsWith("/") ? prompt : WAKE_SENTINEL);
     assert.equal(
       JSON.parse(Buffer.from(calls.at(-1).options.env.PI_TELEGRAM_WAKE_PAYLOAD, "base64url").toString("utf8")).text,
       prompt,
     );
-    child.emit("exit", 0, null);
+    child.emit("close", 0, null);
   }
+});
+
+test("opens an interactive Pi process through a tracked Windows terminal host", async () => {
+  const calls = [];
+  const killed = [];
+  let child;
+  const launcher = new WakeLauncher({
+    piCommand: "C:\\Tools\\pi.exe",
+    piCommandArgs: ["--model", "test/model"],
+    openTerminal: true,
+    platform: "win32",
+    nodeCommand: "C:\\Node\\node.exe",
+    terminalHostPath: "C:\\Package\\terminal-host.cjs",
+    powershell: "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+    killTree(pid) {
+      killed.push(pid);
+    },
+    spawn(command, args, options) {
+      child = new EventEmitter();
+      child.pid = 4321;
+      child.stderr = new PassThrough();
+      calls.push({ command, args, options });
+      process.nextTick(() => child.emit("spawn"));
+      return child;
+    },
+  });
+  const launched = await launcher.launch({ sessionId: "terminal-session", cwd: "C:\\Work", sessionName: "Work", prompt: "continue here" });
+  assert.equal(calls[0].command, "C:\\Program Files\\PowerShell\\7\\pwsh.exe");
+  assert.ok(calls[0].args.includes("-EncodedCommand"));
+  assert.equal(calls[0].options.windowsHide, true);
+  const specPath = calls[0].options.env.PI_TELEGRAM_TERMINAL_SPEC_PATH;
+  assert.ok(specPath);
+  const spec = JSON.parse(await readFile(specPath, "utf8"));
+  assert.equal(spec.command, "C:\\Tools\\pi.exe");
+  assert.equal(spec.cwd, "C:\\Work");
+  assert.deepEqual(spec.args, [
+    "--model", "test/model",
+    "--session-id", "terminal-session",
+    "--name", "Work",
+    "--approve",
+    WAKE_SENTINEL,
+  ]);
+  assert.ok(!spec.args.includes("--print"));
+  assert.equal(launched.foreground, true);
+  assert.equal(launched.terminal, "Windows Console");
+  await writeFile(`${specPath}.pid`, "9876");
+  assert.equal(launcher.cancel("terminal-session"), true);
+  assert.deepEqual(killed, [9876]);
+  child.emit("close", 0, null);
+});
+
+test("falls back to headless mode when Linux has no graphical desktop", async () => {
+  const calls = [];
+  let child;
+  const launcher = new WakeLauncher({
+    piCommand: "pi-test",
+    openTerminal: true,
+    platform: "linux",
+    terminalEnvironment: {},
+    spawn(command, args, options) {
+      child = new EventEmitter();
+      child.stderr = new PassThrough();
+      calls.push({ command, args, options });
+      process.nextTick(() => child.emit("spawn"));
+      return child;
+    },
+  });
+  const launched = await launcher.launch({ sessionId: "fallback", cwd: process.cwd(), sessionName: "Test", prompt: "hello" });
+  assert.equal(launched.foreground, false);
+  assert.match(launched.fallbackReason, /no graphical desktop/);
+  assert.equal(calls[0].command, "pi-test");
+  assert.ok(calls[0].args.includes("--print"));
+  child.emit("close", 0, null);
+});
+
+test("observes a child that closes immediately after spawning", async () => {
+  let exitResult;
+  const launcher = new WakeLauncher({
+    piCommand: "pi-test",
+    spawn() {
+      const child = new EventEmitter();
+      child.stderr = new PassThrough();
+      process.nextTick(() => {
+        child.emit("spawn");
+        child.emit("close", 78, null);
+      });
+      return child;
+    },
+    onExit(result) {
+      exitResult = result;
+    },
+  });
+  await launcher.launch({ sessionId: "fast-exit", cwd: process.cwd(), sessionName: "Test", prompt: "hello" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(launcher.isRunning("fast-exit"), false);
+  assert.equal(exitResult.code, 78);
+});
+
+test("keeps bounded wake stderr and includes it in the exit callback", async () => {
+  let child;
+  let exitResult;
+  const launcher = new WakeLauncher({
+    piCommand: "pi-test",
+    spawn() {
+      child = new EventEmitter();
+      child.stderr = new PassThrough();
+      child.kill = () => {};
+      process.nextTick(() => child.emit("spawn"));
+      return child;
+    },
+    onExit(result) {
+      exitResult = result;
+    },
+  });
+  await launcher.launch({ sessionId: "session-error", cwd: process.cwd(), sessionName: "Test", prompt: "hello" });
+  child.stderr.end("configuration failed\n");
+  child.emit("close", 78, null);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(exitResult.code, 78);
+  assert.equal(exitResult.stderr, "configuration failed");
+  assert.ok(Buffer.byteLength(appendBoundedText("", "x".repeat(9000))) <= 8 * 1024);
 });

@@ -83,7 +83,8 @@ Example non-secret configuration:
   "wakeDefaultCwd": "F:\\",
   "wakeAllowedRoots": ["F:\\"],
   "wakePiCommand": "pi",
-  "wakePiCommandArgs": []
+  "wakePiCommandArgs": [],
+  "wakeOpenTerminal": true
 }
 ```
 
@@ -93,13 +94,19 @@ Example non-secret configuration:
 
 Set `wakeMode` to `true` to let Telegram start Pi when no interactive Pi process owns the target session. `wakeDefaultCwd` is used by `/new | <prompt>`, and every requested working directory must resolve inside one of the `wakeAllowedRoots`. Symbolic links and junctions are resolved before the allowlist check.
 
-The wake process runs Pi with the existing session ID, full tools, and project approval:
+Wake requests open Pi in a foreground terminal by default. Interactive mode omits `--print`, keeps the Pi TUI running after the Telegram turn, and lets you continue the same session from the keyboard when you return to the computer.
+
+- Windows opens a new console window through PowerShell 7 (`pwsh`) when available, with Windows PowerShell as a fallback.
+- macOS activates Terminal.app and opens a new tab.
+- Linux detects `x-terminal-emulator`, GNOME Terminal, Konsole, xfce4-terminal, or xterm in that order.
+
+If no graphical desktop or supported terminal is available, Pi automatically falls back to headless mode and reports the reason in Telegram. Desktop focus-stealing rules may cause the new terminal to flash in the taskbar or dock instead of taking focus. Set `wakeOpenTerminal` to `false` to always use the headless one-shot behavior:
 
 ```text
 pi --session-id <id> --name <name> --print --approve <prompt>
 ```
 
-Only the configured `allowedUserId` can issue wake requests. One background process may run per session; additional messages are delivered through the normal authenticated broker connection.
+Only the configured `allowedUserId` can issue wake requests. One wake process may run per session; additional messages are delivered through the normal authenticated broker connection.
 
 Install the per-user service from the installed checkout:
 
@@ -132,7 +139,7 @@ Messages in an existing session topic wake that exact session. Ordinary unthread
 
 For each connected session, the extension reads `pi.getCommands()` and synchronizes invokable extension commands, prompt templates, and skills into Telegram with `setMyCommands`. Names that Telegram cannot represent directly are converted to stable lowercase aliases, for example `/ctx-stats` becomes `/ctx_stats` and `/skill:frontend-design` becomes `/skill_frontend_design`.
 
-Selecting an alias inside a session topic restores the original Pi command and dispatches it with `expandPromptTemplates: true`. The command mapping is stored with the topic, so it also works when that topic must wake a stopped session. The internal `/telegram-wake` command is never exposed.
+Selecting an alias inside a session topic restores the original Pi command and dispatches it with `expandPromptTemplates: true`. The command mapping is stored with the topic, so it also works when that topic must wake a stopped session. Non-command wake prompts are transferred through the child environment instead of being exposed as CLI arguments.
 
 Telegram permits at most 100 bot commands. Wake controls occupy four entries, and up to 96 discovered Pi commands are published. Built-in interactive-only TUI commands such as `/model`, `/settings`, and `/hotkeys` are intentionally excluded because Pi does not expose them through `getCommands()` and they cannot execute through a remote prompt. Commands that open custom terminal UI may still require an interactive Pi window; prompt templates, skills, and headless extension commands work normally.
 

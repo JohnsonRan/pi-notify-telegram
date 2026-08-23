@@ -22,6 +22,7 @@ test("builds a restartable Linux systemd user unit", () => {
   const unit = systemdUnit("/usr/bin/node", "/home/me/pi notify/daemon.cjs", "/home/me/.pi/agent", "/home/me/bin:/usr/bin");
   assert.match(unit, /ExecStart="\/usr\/bin\/node" "\/home\/me\/pi notify\/daemon\.cjs"/);
   assert.match(unit, /Environment="PATH=\/home\/me\/bin:\/usr\/bin"/);
+  assert.match(unit, /PassEnvironment=DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR/);
   assert.match(unit, /Restart=always/);
   assert.match(unit, /WantedBy=default\.target/);
 });

@@ -145,6 +145,7 @@ async function main() {
       wakeAllowedRoots: [],
       wakePiCommand: "pi",
       wakePiCommandArgs: [],
+      wakeOpenTerminal: true,
     };
     let state = { offset, mappings: [], pendingReplies: [], topics: [] };
     try {

@@ -4,6 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const runtimePath = path.resolve(__dirname, "../src/runtime.cjs");
+const { WAKE_SENTINEL } = require("../src/wake-payload.cjs");
 
 test("creates a session from All Topics and wakes the same topic again", () => {
   const script = String.raw`
@@ -65,6 +66,7 @@ function response(result) { return { ok: true, status: 200, json: async () => ({
     wakeAllowedRoots: [dir],
     wakePiCommand: process.execPath,
     wakePiCommandArgs: [fakePi],
+    wakeOpenTerminal: false,
   });
   const state = await runtime.__test.startLocalLeader(secret);
   const deadline = Date.now() + 5000;
@@ -86,10 +88,10 @@ function response(result) { return { ok: true, status: 200, json: async () => ({
   assert.equal(result.topics.length, 1);
   assert.equal(result.launches.length, 2);
   const firstSessionId = result.launches[0].args[1];
-  assert.deepEqual(result.launches[0].args.slice(-3), ["--print", "--approve", "/telegram-wake"]);
+  assert.deepEqual(result.launches[0].args.slice(-3), ["--print", "--approve", WAKE_SENTINEL]);
   assert.deepEqual(result.launches[0].payload, { text: "first prompt", expandPromptTemplates: true });
   assert.equal(result.launches[1].args[1], firstSessionId);
-  assert.deepEqual(result.launches[1].args.slice(-3), ["--print", "--approve", "/telegram-wake"]);
+  assert.deepEqual(result.launches[1].args.slice(-3), ["--print", "--approve", WAKE_SENTINEL]);
   assert.deepEqual(result.launches[1].payload, { text: "second prompt", expandPromptTemplates: true });
   assert.ok(result.sent.some((message) => message.message_thread_id === 801 && /New Pi session/.test(message.text)));
   assert.ok(result.sent.filter((message) => /Waking Pi session/.test(message.text)).length >= 2);

@@ -37,6 +37,8 @@ const STREAM_THROTTLE_MS = 300;
 const DELIVERY_DEDUPE_MAX = 512;
 const STATE_ENTRY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const STATE_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const WAKE_REGISTRATION_TIMEOUT_MS = 15_000;
+const WAKE_STOP_TIMEOUT_MS = 5_000;
 
 const clientStates = new WeakMap();
 const attachedApis = new WeakSet();
@@ -52,6 +54,15 @@ const CONTROL_COMMANDS = Object.freeze([
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatWakeExitDetail(stderr) {
+  const detail = String(stderr || "")
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "")
+    .trim();
+  if (!detail) return "";
+  return detail.length > 1600 ? `…${detail.slice(-1599)}` : detail;
 }
 
 function normalizePiCommands(commands) {
@@ -114,6 +125,10 @@ function validateSettings(botTokenValue, raw) {
     : [];
   if (wakeMode && wakeAllowedRoots.length === 0) throw new Error("wakeAllowedRoots must contain at least one directory when wakeMode is enabled");
   const wakePiCommand = String(raw.wakePiCommand || "pi").trim() || "pi";
+  if (raw.wakeOpenTerminal !== undefined && typeof raw.wakeOpenTerminal !== "boolean") {
+    throw new Error("wakeOpenTerminal must be a boolean");
+  }
+  const wakeOpenTerminal = raw.wakeOpenTerminal ?? true;
   const wakePiCommandArgs = Array.isArray(raw.wakePiCommandArgs)
     ? raw.wakePiCommandArgs.map((argument) => String(argument))
     : [];
@@ -129,6 +144,7 @@ function validateSettings(botTokenValue, raw) {
     wakeAllowedRoots: Object.freeze(wakeAllowedRoots),
     wakePiCommand,
     wakePiCommandArgs: Object.freeze(wakePiCommandArgs),
+    wakeOpenTerminal,
   });
 }
 
@@ -416,6 +432,24 @@ async function sendBrokerText(state, text, options = {}) {
   });
 }
 
+async function waitForWakeRegistration(state, sessionId, timeoutMs = WAKE_REGISTRATION_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const client = connectedTarget(state, sessionId);
+    if (client?.wakeChild) return client;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return undefined;
+}
+
+async function waitForWakeStop(state, sessionId, timeoutMs = WAKE_STOP_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (state.wakeLauncher.isRunning(sessionId) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return !state.wakeLauncher.isRunning(sessionId);
+}
+
 async function launchWakeSession(state, topic, prompt, replyTo) {
   if (state.wakeReservations.has(topic.sessionId)) return { started: false, reserved: true };
   state.wakeReservations.add(topic.sessionId);
@@ -429,17 +463,44 @@ async function launchWakeSession(state, topic, prompt, replyTo) {
       if (pending.sessionId === topic.sessionId) pending.holdForWake = true;
     }
     queuePersist(state).catch(() => {});
-    const launched = await state.wakeLauncher.launch({
+    let launched = await state.wakeLauncher.launch({
       sessionId: topic.sessionId,
       cwd,
       sessionName: topic.name,
       prompt,
     });
     if (launched.started) {
-      await sendBrokerText(state, `Waking Pi session ${topic.sessionId.slice(0, 8)}…`, {
+      let mode = launched.foreground
+        ? `Opening ${launched.terminal || "terminal"}`
+        : launched.fallbackReason
+          ? `No terminal available; using background mode (${launched.fallbackReason})`
+          : "Starting in background mode";
+      await sendBrokerText(state, `Waking Pi session ${topic.sessionId.slice(0, 8)}…\n${mode}`, {
         threadId: topic.threadId,
         replyTo,
       });
+      if (launched.foreground && !await waitForWakeRegistration(state, topic.sessionId)) {
+        state.wakeLauncher.cancel(topic.sessionId);
+        const stopped = await waitForWakeStop(state, topic.sessionId);
+        const connected = connectedTarget(state, topic.sessionId);
+        if (!connected && stopped) {
+          state.wakeReservations.add(topic.sessionId);
+          const fallback = await state.wakeLauncher.launch({
+            sessionId: topic.sessionId,
+            cwd,
+            sessionName: topic.name,
+            prompt,
+            openTerminal: false,
+          });
+          if (fallback.started) {
+            launched = fallback;
+            mode = "Terminal did not connect; switched to background mode";
+            await sendBrokerText(state, mode, { threadId: topic.threadId, replyTo });
+          }
+        } else if (!connected) {
+          throw new Error("The terminal opened but Pi did not connect to the Telegram broker");
+        }
+      }
     } else if (!state.wakeLauncher.isRunning(topic.sessionId)) {
       state.wakeReservations.delete(topic.sessionId);
     }
@@ -475,7 +536,8 @@ async function handleControlMessage(state, message) {
     await sendBrokerText(state, [
       "Pi Telegram wake broker is running.",
       `Connected Pi sessions: ${state.clientsBySession.size}`,
-      `Background Pi sessions: ${state.wakeLauncher.runningSessionIds().length}`,
+      `Preferred wake mode: ${state.secret.wakeOpenTerminal ? "foreground terminal (auto fallback)" : "background"}`,
+      `Wake Pi sessions: ${state.wakeLauncher.runningSessionIds().length}`,
       `Known topics: ${state.topics.size}`,
     ].join("\n"), replyOptions);
     return;
@@ -873,12 +935,18 @@ async function startLocalLeader(secret) {
   state.wakeLauncher = new WakeLauncher({
     piCommand: secret.wakePiCommand,
     piCommandArgs: secret.wakePiCommandArgs,
-    onExit: async ({ sessionId, code, signal, cancelled }) => {
+    openTerminal: secret.wakeOpenTerminal,
+    terminalSpecDir: path.join(AGENT_DIR, "terminal-launches"),
+    onExit: async ({ sessionId, code, signal, cancelled, stderr }) => {
       state.wakeReservations.delete(sessionId);
       if (code === 0 || cancelled) return;
       const topic = state.topics.get(sessionId);
       if (!topic) return;
-      await sendBrokerText(state, `Background Pi exited before completing (${signal || `code ${code}`}).`, { threadId: topic.threadId });
+      const detail = formatWakeExitDetail(stderr);
+      await sendBrokerText(state, [
+        `Background Pi exited before completing (${signal || `code ${code}`}).`,
+        ...(detail ? ["", detail] : []),
+      ].join("\n"), { threadId: topic.threadId });
     },
   });
   pruneExpiredBrokerState(state);
@@ -1394,5 +1462,5 @@ module.exports = Object.freeze({
   attach,
   notify,
   runWakeDaemon,
-  __test: Object.freeze({ assistantText, findReplyTarget, handleControlMessage, normalizePiCommands, pruneExpiredBrokerState, splitTelegramText, startLocalLeader, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings }),
+  __test: Object.freeze({ assistantText, findReplyTarget, formatWakeExitDetail, handleControlMessage, normalizePiCommands, pruneExpiredBrokerState, splitTelegramText, startLocalLeader, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStop }),
 });

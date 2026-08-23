@@ -3,6 +3,10 @@ import { createRequire } from "node:module";
 import { hostname } from "node:os";
 
 const require = createRequire(import.meta.url);
+const { decodeWakePayload, WAKE_SENTINEL } = require("./src/wake-payload.cjs") as {
+  decodeWakePayload(encoded: string | undefined): { text: string; expandPromptTemplates: boolean };
+  WAKE_SENTINEL: string;
+};
 const runtime = require("./src/runtime.cjs") as {
   attach(pi: ExtensionAPI): void;
   notify(
@@ -69,20 +73,14 @@ export default function piNotifyTelegram(pi: ExtensionAPI): void {
   // topic would duplicate output and expose internal worker conversations.
   if (process.env.PI_SUBAGENT_CHILD === "1") return;
 
-  pi.registerCommand("telegram-wake", {
-    description: "Internal command used by the Telegram wake daemon",
-    handler: async () => {
-      const encoded = process.env.PI_TELEGRAM_WAKE_PAYLOAD;
-      delete process.env.PI_TELEGRAM_WAKE_PAYLOAD;
-      if (!encoded) return;
-      const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as {
-        text?: unknown;
-        expandPromptTemplates?: unknown;
-      };
-      const text = String(payload.text ?? "");
-      if (!text) return;
-      pi.sendUserMessage(text, { expandPromptTemplates: payload.expandPromptTemplates === true });
-    },
+  pi.on("input", (event) => {
+    if (event.text !== WAKE_SENTINEL || process.env.PI_TELEGRAM_WAKE_CHILD !== "1") {
+      return { action: "continue" };
+    }
+    const encoded = process.env.PI_TELEGRAM_WAKE_PAYLOAD;
+    delete process.env.PI_TELEGRAM_WAKE_PAYLOAD;
+    const payload = decodeWakePayload(encoded);
+    return { action: "transform", text: payload.text };
   });
 
   runtime.attach(pi);

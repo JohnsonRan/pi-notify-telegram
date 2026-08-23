@@ -35,7 +35,43 @@ test("validates split secret/config settings", () => {
     wakeAllowedRoots: ["F:\\"],
   });
   assert.equal(wake.wakeMode, true);
+  assert.equal(wake.wakeOpenTerminal, true);
   assert.deepEqual(wake.wakeAllowedRoots, ["F:\\"]);
+  const background = runtime.__test.validateSettings(`123456:${"a".repeat(32)}`, {
+    chatId: 42,
+    bridgeSecret: "b".repeat(64),
+    wakeMode: true,
+    wakeDefaultCwd: "F:\\",
+    wakeAllowedRoots: ["F:\\"],
+    wakeOpenTerminal: false,
+  });
+  assert.equal(background.wakeOpenTerminal, false);
+  assert.throws(() => runtime.__test.validateSettings(`123456:${"a".repeat(32)}`, {
+    chatId: 42,
+    bridgeSecret: "b".repeat(64),
+    wakeMode: true,
+    wakeAllowedRoots: ["F:\\"],
+    wakeOpenTerminal: "false",
+  }), /wakeOpenTerminal must be a boolean/);
+});
+
+test("waits for foreground wake registration and stop state", async () => {
+  const client = { wakeChild: true, registered: true, socket: { destroyed: false } };
+  const state = {
+    clientsBySession: new Map(),
+    wakeLauncher: { isRunning: () => false },
+  };
+  setTimeout(() => state.clientsBySession.set("session", client), 10);
+  assert.equal(await runtime.__test.waitForWakeRegistration(state, "session", 200), client);
+  assert.equal(await runtime.__test.waitForWakeRegistration(state, "missing", 10), undefined);
+  assert.equal(await runtime.__test.waitForWakeStop(state, "session", 10), true);
+});
+
+test("formats bounded wake process diagnostics for Telegram", () => {
+  assert.equal(runtime.__test.formatWakeExitDetail("\u001b[31mconfig failed\u001b[0m\n"), "config failed");
+  const detail = runtime.__test.formatWakeExitDetail("x".repeat(2000));
+  assert.equal(detail.length, 1600);
+  assert.ok(detail.startsWith("…"));
 });
 
 test("maps Pi command names to Telegram-safe aliases and restores them", () => {
@@ -117,7 +153,7 @@ const os = require("node:os");
 const path = require("node:path");
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-notify-telegram-test-"));
 fs.writeFileSync(path.join(dir, "pi-notify-telegram.secret"), "123456:${"a".repeat(32)}\n");
-fs.writeFileSync(path.join(dir, "pi-notify-telegram.json"), JSON.stringify({ chatId: 42, allowedUserId: 42, bridgeSecret: "${"b".repeat(64)}", port: 43989, wakeMode: true, wakeDefaultCwd: dir, wakeAllowedRoots: [dir] }));
+fs.writeFileSync(path.join(dir, "pi-notify-telegram.json"), JSON.stringify({ chatId: 42, allowedUserId: 42, bridgeSecret: "${"b".repeat(64)}", port: 43989, wakeMode: true, wakeDefaultCwd: dir, wakeAllowedRoots: [dir], wakeOpenTerminal: false }));
 fs.writeFileSync(path.join(dir, "pi-notify-telegram.state.json"), JSON.stringify({ offset: 0, mappings: [], pendingReplies: [], topics: [] }));
 process.env.PI_CODING_AGENT_DIR = dir;
 process.env.PI_TELEGRAM_DAEMON = "1";
