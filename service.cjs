@@ -4,6 +4,7 @@ const { execFileSync } = require("node:child_process");
 const { mkdirSync, rmSync, writeFileSync } = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { daemonLogPath } = require("./src/daemon-log.cjs");
 
 const SERVICE_NAME = "pi-notify-telegram";
 const WINDOWS_TASK = "PiNotifyTelegram";
@@ -127,6 +128,7 @@ if (require.main === module) {
   try {
     serviceAction(action);
     if (action === "install") console.log(`Installed and started ${SERVICE_NAME} for ${process.platform}.`);
+    if (action === "status") console.log(`Daemon log: ${daemonLogPath(AGENT_DIR)}`);
     if (action === "uninstall") console.log(`Uninstalled ${SERVICE_NAME} for ${process.platform}.`);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));

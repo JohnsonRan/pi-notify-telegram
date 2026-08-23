@@ -117,11 +117,18 @@ node "$HOME/.pi/agent/git/github.com/JohnsonRan/pi-notify-telegram/service.cjs" 
 
 The command selects the native service manager for the current platform:
 
-- Windows: per-user Scheduled Task
+- Windows: hidden per-user Scheduled Task (no persistent console window)
 - macOS: `~/Library/LaunchAgents/com.johnsonran.pi-notify-telegram.plist`
 - Linux: `~/.config/systemd/user/pi-notify-telegram.service`
 
-Service lifecycle commands are `install`, `start`, `stop`, `status`, and `uninstall`. The daemon waits if an older embedded broker still owns the port, then takes ownership automatically after that Pi process exits.
+Service lifecycle commands are `install`, `start`, `stop`, `status`, and `uninstall`. The daemon writes bounded diagnostics to `~/.pi/agent/pi-notify-telegram.log`; `status` also prints the resolved log path. The daemon waits if an older embedded broker still owns the port, then takes ownership automatically after that Pi process exits.
+
+A running daemon keeps its loaded code after the package checkout updates. Restart it before testing a newly installed version:
+
+```bash
+node "$HOME/.pi/agent/git/github.com/JohnsonRan/pi-notify-telegram/service.cjs" stop
+node "$HOME/.pi/agent/git/github.com/JohnsonRan/pi-notify-telegram/service.cjs" start
+```
 
 All Topics is command-only:
 
@@ -196,6 +203,8 @@ Assistant text is observed through Pi's `message_start`, `message_update`, and `
 npm install
 npm run check
 ```
+
+GitHub Actions runs the same check on Windows, macOS, and Linux. The Windows job also executes the hidden VBS daemon launcher and verifies that it waits for the child process and preserves its exit code.
 
 ## License
 

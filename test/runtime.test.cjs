@@ -71,6 +71,25 @@ test("waits for foreground wake registration, stability, and stop state", async 
   assert.equal(await runtime.__test.waitForWakeStop(state, "session", 10), true);
 });
 
+test("formats broker diagnostics for Telegram status", () => {
+  const text = runtime.__test.formatBrokerStatus({
+    pid: 4321,
+    packageVersion: "1.2.3",
+    startedAt: Date.parse("2026-01-02T03:04:05.000Z"),
+    clientsBySession: new Map([["one", {}]]),
+    secret: { wakeOpenTerminal: true },
+    wakeLauncher: { runningSessionIds: () => ["one", "two"] },
+    topics: new Map([["one", {}], ["two", {}], ["three", {}]]),
+  }, Date.parse("2026-01-03T05:07:08.000Z"));
+  assert.match(text, /Broker PID: 4321/);
+  assert.match(text, /Version: 1\.2\.3/);
+  assert.match(text, /Started: 2026-01-02T03:04:05\.000Z/);
+  assert.match(text, /Uptime: 1d 2h 3m 3s/);
+  assert.match(text, /Connected Pi sessions: 1/);
+  assert.match(text, /Wake Pi sessions: 2/);
+  assert.match(text, /Known topics: 3/);
+});
+
 test("formats bounded wake process diagnostics for Telegram", () => {
   assert.equal(runtime.__test.formatWakeExitDetail("\u001b[31mconfig failed\u001b[0m\n"), "config failed");
   const detail = runtime.__test.formatWakeExitDetail("x".repeat(2000));

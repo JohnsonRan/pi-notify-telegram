@@ -19,6 +19,7 @@ const {
   splitMarkdown,
 } = require("./format.cjs");
 const { WakeLauncher, parseControlCommand, resolveWakeCwd } = require("./wake.cjs");
+const { version: PACKAGE_VERSION } = require("../package.json");
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(process.env.USERPROFILE || process.env.HOME, ".pi", "agent");
 const SECRET_PATH = path.join(AGENT_DIR, "pi-notify-telegram.secret");
@@ -56,6 +57,37 @@ const CONTROL_COMMANDS = Object.freeze([
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatDuration(milliseconds) {
+  let seconds = Math.max(0, Math.floor(Number(milliseconds) / 1000));
+  const days = Math.floor(seconds / 86_400);
+  seconds %= 86_400;
+  const hours = Math.floor(seconds / 3_600);
+  seconds %= 3_600;
+  const minutes = Math.floor(seconds / 60);
+  seconds %= 60;
+  return [
+    ...(days ? [`${days}d`] : []),
+    ...(hours ? [`${hours}h`] : []),
+    ...(minutes ? [`${minutes}m`] : []),
+    `${seconds}s`,
+  ].join(" ");
+}
+
+function formatBrokerStatus(state, now = Date.now()) {
+  const startedAt = Number(state.startedAt) || now;
+  return [
+    "Pi Telegram wake broker is running.",
+    `Broker PID: ${state.pid || process.pid}`,
+    `Version: ${state.packageVersion || PACKAGE_VERSION}`,
+    `Started: ${new Date(startedAt).toISOString()}`,
+    `Uptime: ${formatDuration(now - startedAt)}`,
+    `Connected Pi sessions: ${state.clientsBySession.size}`,
+    `Preferred wake mode: ${state.secret.wakeOpenTerminal ? "foreground terminal (auto fallback)" : "background"}`,
+    `Wake Pi sessions: ${state.wakeLauncher.runningSessionIds().length}`,
+    `Known topics: ${state.topics.size}`,
+  ].join("\n");
 }
 
 function formatWakeExitDetail(stderr) {
@@ -558,13 +590,7 @@ async function handleControlMessage(state, message) {
     return;
   }
   if (parsed.command === "status") {
-    await sendBrokerText(state, [
-      "Pi Telegram wake broker is running.",
-      `Connected Pi sessions: ${state.clientsBySession.size}`,
-      `Preferred wake mode: ${state.secret.wakeOpenTerminal ? "foreground terminal (auto fallback)" : "background"}`,
-      `Wake Pi sessions: ${state.wakeLauncher.runningSessionIds().length}`,
-      `Known topics: ${state.topics.size}`,
-    ].join("\n"), replyOptions);
+    await sendBrokerText(state, formatBrokerStatus(state), replyOptions);
     return;
   }
   if (parsed.command === "sessions") {
@@ -940,6 +966,9 @@ async function startLocalLeader(secret) {
   }
   const state = {
     secret,
+    pid: process.pid,
+    packageVersion: PACKAGE_VERSION,
+    startedAt: Date.now(),
     offset: stored.offset,
     mappings: new Map(stored.mappings.map((item) => [item.messageId, item])),
     pendingReplies: new Map(stored.pendingReplies.map((item) => [item.deliveryId, item])),
@@ -1640,5 +1669,5 @@ module.exports = Object.freeze({
   attach,
   notify,
   runWakeDaemon,
-  __test: Object.freeze({ assistantText, findReplyTarget, formatLiveStatus, formatWakeExitDetail, handleControlMessage, normalizePiCommands, pruneExpiredBrokerState, splitTelegramText, startLocalLeader, subagentProgress, summarizeToolArgs, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStability, waitForWakeStop }),
+  __test: Object.freeze({ assistantText, findReplyTarget, formatBrokerStatus, formatDuration, formatLiveStatus, formatWakeExitDetail, handleControlMessage, normalizePiCommands, pruneExpiredBrokerState, splitTelegramText, startLocalLeader, subagentProgress, summarizeToolArgs, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStability, waitForWakeStop }),
 });
