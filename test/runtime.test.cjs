@@ -22,6 +22,20 @@ test("validates split secret/config settings", () => {
     linkPreview: true,
   });
   assert.equal(enabled.linkPreview, true);
+  assert.throws(() => runtime.__test.validateSettings(`123456:${"a".repeat(32)}`, {
+    chatId: 42,
+    bridgeSecret: "b".repeat(64),
+    wakeMode: true,
+  }), /wakeAllowedRoots/);
+  const wake = runtime.__test.validateSettings(`123456:${"a".repeat(32)}`, {
+    chatId: 42,
+    bridgeSecret: "b".repeat(64),
+    wakeMode: true,
+    wakeDefaultCwd: "F:\\",
+    wakeAllowedRoots: ["F:\\"],
+  });
+  assert.equal(wake.wakeMode, true);
+  assert.deepEqual(wake.wakeAllowedRoots, ["F:\\"]);
 });
 
 test("builds stable topic names, chunks text, and rejects unthreaded fallback routing", () => {
@@ -87,9 +101,10 @@ const os = require("node:os");
 const path = require("node:path");
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-notify-telegram-test-"));
 fs.writeFileSync(path.join(dir, "pi-notify-telegram.secret"), "123456:${"a".repeat(32)}\n");
-fs.writeFileSync(path.join(dir, "pi-notify-telegram.json"), JSON.stringify({ chatId: 42, allowedUserId: 42, bridgeSecret: "${"b".repeat(64)}", port: 43989 }));
+fs.writeFileSync(path.join(dir, "pi-notify-telegram.json"), JSON.stringify({ chatId: 42, allowedUserId: 42, bridgeSecret: "${"b".repeat(64)}", port: 43989, wakeMode: true, wakeDefaultCwd: dir, wakeAllowedRoots: [dir] }));
 fs.writeFileSync(path.join(dir, "pi-notify-telegram.state.json"), JSON.stringify({ offset: 0, mappings: [], pendingReplies: [], topics: [] }));
 process.env.PI_CODING_AGENT_DIR = dir;
+process.env.PI_TELEGRAM_DAEMON = "1";
 
 let nextThread = 700;
 let nextMessage = 100;
@@ -127,7 +142,7 @@ global.fetch = async (url, options) => {
         message: {
           message_id: 200 + index,
           message_thread_id: threadId,
-          text: index === 0 ? "reply-one" : "reply-two",
+          text: index === 0 ? "/status" : "reply-two",
           chat: { id: 42 },
           from: { id: 42, is_bot: false },
         },
@@ -214,7 +229,7 @@ async function emit(pi, event, payload, ctx) {
   });
   assert.equal(child.status, 0, child.stderr || child.stdout);
   const result = JSON.parse(child.stdout.trim());
-  assert.deepEqual(result.pi1.map((item) => item.text), ["reply-one"]);
+  assert.deepEqual(result.pi1.map((item) => item.text), ["/status"]);
   assert.deepEqual(result.pi2.map((item) => item.text), ["reply-two"]);
   assert.equal(result.topicCount, 2);
   assert.deepEqual(result.topicThreads, [701, 702]);

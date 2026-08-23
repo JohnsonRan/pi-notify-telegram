@@ -7,6 +7,7 @@
  * while each connected Pi process injects replies with pi.sendUserMessage().
  */
 
+const { spawn } = require("node:child_process");
 const { randomInt, randomUUID } = require("node:crypto");
 const { readFile, writeFile, rename } = require("node:fs/promises");
 const net = require("node:net");
@@ -17,11 +18,13 @@ const {
   renderTelegramHtml,
   splitMarkdown,
 } = require("./format.cjs");
+const { WakeLauncher, parseControlCommand, resolveWakeCwd } = require("./wake.cjs");
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(process.env.USERPROFILE || process.env.HOME, ".pi", "agent");
 const SECRET_PATH = path.join(AGENT_DIR, "pi-notify-telegram.secret");
 const CONFIG_PATH = path.join(AGENT_DIR, "pi-notify-telegram.json");
 const STATE_PATH = path.join(AGENT_DIR, "pi-notify-telegram.state.json");
+const DAEMON_PATH = path.join(__dirname, "..", "daemon.cjs");
 const DEFAULT_PORT = 43871;
 const MAX_LINE_BYTES = 256 * 1024;
 const MAX_MAPPINGS = 200;
@@ -38,6 +41,7 @@ const STATE_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const clientStates = new WeakMap();
 const attachedApis = new WeakSet();
 let localLeaderPromise;
+let daemonLaunchPromise;
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
@@ -60,7 +64,29 @@ function validateSettings(botTokenValue, raw) {
   const port = raw.port === undefined ? DEFAULT_PORT : asInteger(raw.port, "port");
   if (port < 1024 || port > 65535) throw new Error("port must be between 1024 and 65535");
   const linkPreview = raw.linkPreview === true;
-  return Object.freeze({ botToken, chatId, allowedUserId, bridgeSecret, port, linkPreview });
+  const wakeMode = raw.wakeMode === true;
+  const wakeDefaultCwd = String(raw.wakeDefaultCwd || "").trim();
+  const wakeAllowedRoots = Array.isArray(raw.wakeAllowedRoots)
+    ? raw.wakeAllowedRoots.map((root) => String(root || "").trim()).filter(Boolean)
+    : [];
+  if (wakeMode && wakeAllowedRoots.length === 0) throw new Error("wakeAllowedRoots must contain at least one directory when wakeMode is enabled");
+  const wakePiCommand = String(raw.wakePiCommand || "pi").trim() || "pi";
+  const wakePiCommandArgs = Array.isArray(raw.wakePiCommandArgs)
+    ? raw.wakePiCommandArgs.map((argument) => String(argument))
+    : [];
+  return Object.freeze({
+    botToken,
+    chatId,
+    allowedUserId,
+    bridgeSecret,
+    port,
+    linkPreview,
+    wakeMode,
+    wakeDefaultCwd,
+    wakeAllowedRoots: Object.freeze(wakeAllowedRoots),
+    wakePiCommand,
+    wakePiCommandArgs: Object.freeze(wakePiCommandArgs),
+  });
 }
 
 async function readSecret() {
@@ -70,7 +96,7 @@ async function readSecret() {
     [token, configText] = await Promise.all([readFile(SECRET_PATH, "utf8"), readFile(CONFIG_PATH, "utf8")]);
   } catch (error) {
     if (error?.code === "ENOENT") {
-      throw new Error(`Telegram setup is incomplete. Run pi-notify-telegram-setup.cjs first.`);
+      throw new Error("Telegram setup is incomplete. Run the installed pi-notify-telegram setup.cjs first.");
     }
     throw error;
   }
@@ -303,14 +329,145 @@ function deliverPendingReply(state, pending) {
 
 function deliverPendingForSession(state, sessionId) {
   for (const pending of state.pendingReplies.values()) {
-    if (pending.sessionId === sessionId) deliverPendingReply(state, pending);
+    if (pending.sessionId === sessionId && !pending.holdForWake) deliverPendingReply(state, pending);
   }
+}
+
+async function sendBrokerText(state, text, options = {}) {
+  return telegramCall(state.secret, "sendMessage", {
+    chat_id: state.secret.chatId,
+    text: String(text),
+    link_preview_options: { is_disabled: true },
+    ...(Number.isSafeInteger(options.threadId) ? { message_thread_id: options.threadId } : {}),
+    ...(Number.isSafeInteger(options.replyTo) ? { reply_to_message_id: options.replyTo } : {}),
+  });
+}
+
+async function launchWakeSession(state, topic, prompt, replyTo) {
+  if (state.wakeReservations.has(topic.sessionId)) return { started: false, reserved: true };
+  state.wakeReservations.add(topic.sessionId);
+  try {
+    const cwd = await resolveWakeCwd(topic.cwd, state.secret.wakeDefaultCwd, state.secret.wakeAllowedRoots);
+    if (connectedTarget(state, topic.sessionId)) {
+      state.wakeReservations.delete(topic.sessionId);
+      return { started: false, connected: true };
+    }
+    for (const pending of state.pendingReplies.values()) {
+      if (pending.sessionId === topic.sessionId) pending.holdForWake = true;
+    }
+    queuePersist(state).catch(() => {});
+    const launched = await state.wakeLauncher.launch({
+      sessionId: topic.sessionId,
+      cwd,
+      sessionName: topic.name,
+      prompt,
+    });
+    if (launched.started) {
+      await sendBrokerText(state, `Waking Pi session ${topic.sessionId.slice(0, 8)}…`, {
+        threadId: topic.threadId,
+        replyTo,
+      });
+    } else if (!state.wakeLauncher.isRunning(topic.sessionId)) {
+      state.wakeReservations.delete(topic.sessionId);
+    }
+    return launched;
+  } catch (error) {
+    state.wakeReservations.delete(topic.sessionId);
+    throw error;
+  }
+}
+
+async function handleControlMessage(state, message) {
+  const parsed = parseControlCommand(message.text);
+  const replyOptions = {
+    replyTo: message.message_id,
+    ...(Number.isSafeInteger(message.message_thread_id) ? { threadId: message.message_thread_id } : {}),
+  };
+  if (!parsed) {
+    await sendBrokerText(state, "Use /new, /sessions, /status, or /help in All Topics.", replyOptions);
+    return;
+  }
+  if (parsed.command === "help") {
+    await sendBrokerText(state, [
+      "Pi Telegram wake commands:",
+      "/new <cwd> | <prompt> — create and run a session",
+      "/new <cwd> — create a session topic without running it",
+      "/new | <prompt> — use wakeDefaultCwd",
+      "/sessions — list known session topics",
+      "/status — show broker status",
+    ].join("\n"), replyOptions);
+    return;
+  }
+  if (parsed.command === "status") {
+    await sendBrokerText(state, [
+      "Pi Telegram wake broker is running.",
+      `Connected Pi sessions: ${state.clientsBySession.size}`,
+      `Background Pi sessions: ${state.wakeLauncher.runningSessionIds().length}`,
+      `Known topics: ${state.topics.size}`,
+    ].join("\n"), replyOptions);
+    return;
+  }
+  if (parsed.command === "sessions") {
+    const topics = [...state.topics.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 20);
+    const text = topics.length === 0
+      ? "No Pi session topics are known yet."
+      : ["Known Pi sessions:", ...topics.map((topic) => `${topic.name || "Pi"} · ${topic.sessionId.slice(0, 8)} · ${topic.cwd || "no cwd"}`)].join("\n");
+    await sendBrokerText(state, text, replyOptions);
+    return;
+  }
+
+  const cwd = await resolveWakeCwd(parsed.cwd, state.secret.wakeDefaultCwd, state.secret.wakeAllowedRoots);
+  const sessionId = randomUUID();
+  const sessionName = path.basename(cwd) || "Pi";
+  const topic = await ensureTopic(state, sessionId, cwd, sessionName);
+  await sendBrokerText(state, `New Pi session ${sessionId.slice(0, 8)}\nWorking directory: ${cwd}`, { threadId: topic.threadId });
+  if (parsed.prompt) await launchWakeSession(state, topic, parsed.prompt);
+}
+
+async function queueTelegramReply(state, target, message, holdForWake = false) {
+  const pending = {
+    deliveryId: randomUUID(),
+    text: message.text,
+    telegramMessageId: message.message_id,
+    notificationMessageId: target.messageId,
+    threadId: target.threadId || message.message_thread_id,
+    sessionId: target.sessionId,
+    createdAt: Date.now(),
+    ...(holdForWake ? { holdForWake: true } : {}),
+  };
+  state.pendingReplies.set(pending.deliveryId, pending);
+  await queuePersist(state);
+  const delivered = holdForWake ? false : deliverPendingReply(state, pending);
+  return { pending, delivered };
+}
+
+function releaseWakeFollowups(state, sessionId) {
+  for (const pending of state.pendingReplies.values()) {
+    if (pending.sessionId !== sessionId || !pending.holdForWake) continue;
+    delete pending.holdForWake;
+    deliverPendingReply(state, pending);
+  }
+  queuePersist(state).catch(() => {});
 }
 
 async function handleTelegramMessage(state, message) {
   if (!message || typeof message.text !== "string") return;
   if (message.chat?.id !== state.secret.chatId || message.from?.id !== state.secret.allowedUserId) return;
   if (message.from?.is_bot === true || message.text.trim().startsWith("/start")) return;
+
+  const threadIsKnown = Number.isSafeInteger(message.message_thread_id) &&
+    [...state.topics.values()].some((topic) => topic.threadId === message.message_thread_id);
+  if (state.secret.wakeMode && !threadIsKnown) {
+    try {
+      await handleControlMessage(state, message);
+    } catch (error) {
+      await sendBrokerText(state, `Command failed: ${errorMessage(error)}`, {
+        replyTo: message.message_id,
+        ...(Number.isSafeInteger(message.message_thread_id) ? { threadId: message.message_thread_id } : {}),
+      }).catch(() => {});
+    }
+    return;
+  }
 
   const target = findReplyTarget(state, message);
   if (!target) {
@@ -323,6 +480,28 @@ async function handleTelegramMessage(state, message) {
     return;
   }
 
+  let holdForWake = false;
+  if (!connectedTarget(state, target.sessionId) && state.secret.wakeMode) {
+    const topic = state.topics.get(target.sessionId);
+    if (topic) {
+      if (state.wakeLauncher.isRunning(target.sessionId) || state.wakeReservations.has(target.sessionId)) {
+        holdForWake = true;
+      } else {
+        try {
+          const launched = await launchWakeSession(state, topic, message.text, message.message_id);
+          if (launched.started) return;
+          holdForWake = launched.reserved === true;
+        } catch (error) {
+          await sendBrokerText(state, `Could not wake Pi: ${errorMessage(error)}`, {
+            threadId: message.message_thread_id,
+            replyTo: message.message_id,
+          }).catch(() => {});
+          return;
+        }
+      }
+    }
+  }
+
   if (pruneExpiredBrokerState(state)) queuePersist(state).catch(() => {});
   if (state.pendingReplies.size >= MAX_PENDING_REPLIES) {
     await telegramCall(state.secret, "sendMessage", {
@@ -333,22 +512,13 @@ async function handleTelegramMessage(state, message) {
     return;
   }
 
-  const pending = {
-    deliveryId: randomUUID(),
-    text: message.text,
-    telegramMessageId: message.message_id,
-    notificationMessageId: target.messageId,
-    threadId: target.threadId || message.message_thread_id,
-    sessionId: target.sessionId,
-    createdAt: Date.now(),
-  };
-  state.pendingReplies.set(pending.deliveryId, pending);
-  await queuePersist(state);
-
-  if (!deliverPendingReply(state, pending)) {
+  const queued = await queueTelegramReply(state, target, message, holdForWake);
+  if (!queued.delivered) {
     await telegramCall(state.secret, "sendMessage", {
       chat_id: state.secret.chatId,
-      text: "Reply queued until the target Pi session reconnects.",
+      text: holdForWake
+        ? "Reply queued behind the session's current wake turn."
+        : "Reply queued until the target Pi session reconnects.",
       reply_to_message_id: message.message_id,
       ...(Number.isSafeInteger(message.message_thread_id) ? { message_thread_id: message.message_thread_id } : {}),
     }).catch((error) => console.warn(`[pi-notify-telegram] ${errorMessage(error)}`));
@@ -512,7 +682,12 @@ function handleBrokerRequest(state, client, message) {
     client.sessionId = message.sessionId;
     client.cwd = typeof message.cwd === "string" ? message.cwd : "";
     client.sessionName = typeof message.sessionName === "string" ? message.sessionName : "";
+    client.wakeChild = message.wakeChild === true;
     client.registered = true;
+    if (!client.wakeChild && state.wakeReservations.has(client.sessionId)) {
+      state.wakeLauncher.cancel(client.sessionId);
+      state.wakeReservations.delete(client.sessionId);
+    }
     for (const [registeredSessionId, registeredClient] of state.clientsBySession) {
       if (registeredClient === client && registeredSessionId !== client.sessionId) state.clientsBySession.delete(registeredSessionId);
     }
@@ -521,7 +696,8 @@ function handleBrokerRequest(state, client, message) {
     state.clients.set(client.clientId, client);
     state.clientsBySession.set(client.sessionId, client);
     sendLine(client.socket, { type: "registered", version: PROTOCOL_VERSION });
-    deliverPendingForSession(state, client.sessionId);
+    if (client.wakeChild) deliverPendingForSession(state, client.sessionId);
+    else releaseWakeFollowups(state, client.sessionId);
     return;
   }
   if (message.type === "replyAck" && client.registered && typeof message.deliveryId === "string") {
@@ -553,6 +729,7 @@ function handleBrokerRequest(state, client, message) {
   if (message.type === "streamFinal") {
     if (typeof message.requestId !== "string") return;
     handleStreamRequest(state, client, message).then(() => {
+      if (client.wakeChild) releaseWakeFollowups(state, client.sessionId);
       sendLine(client.socket, { type: "result", requestId: message.requestId, ok: true });
     }).catch((error) => {
       sendLine(client.socket, { type: "result", requestId: message.requestId, ok: false, error: errorMessage(error) });
@@ -569,7 +746,27 @@ function handleBrokerRequest(state, client, message) {
 }
 
 async function startLocalLeader(secret) {
-  const stored = await readBrokerState();
+  const server = net.createServer({ pauseOnConnect: true });
+  const acquired = await new Promise((resolve, reject) => {
+    const onBindError = (error) => {
+      if (error?.code === "EADDRINUSE") resolve(false);
+      else reject(error);
+    };
+    server.once("error", onBindError);
+    server.listen(secret.port, "127.0.0.1", () => {
+      server.off("error", onBindError);
+      resolve(true);
+    });
+  });
+  if (!acquired) return undefined;
+
+  let stored;
+  try {
+    stored = await readBrokerState();
+  } catch (error) {
+    server.close();
+    throw error;
+  }
   const state = {
     secret,
     offset: stored.offset,
@@ -580,10 +777,24 @@ async function startLocalLeader(secret) {
     streamQueues: new Map(),
     clients: new Map(),
     clientsBySession: new Map(),
+    wakeReservations: new Set(),
+    wakeLauncher: undefined,
     persistQueue: Promise.resolve(),
     cleanupTimer: undefined,
     closed: false,
+    server,
   };
+  state.wakeLauncher = new WakeLauncher({
+    piCommand: secret.wakePiCommand,
+    piCommandArgs: secret.wakePiCommandArgs,
+    onExit: async ({ sessionId, code, signal, cancelled }) => {
+      state.wakeReservations.delete(sessionId);
+      if (code === 0 || cancelled) return;
+      const topic = state.topics.get(sessionId);
+      if (!topic) return;
+      await sendBrokerText(state, `Background Pi exited before completing (${signal || `code ${code}`}).`, { threadId: topic.threadId });
+    },
+  });
   pruneExpiredBrokerState(state);
   queuePersist(state).catch((error) => console.warn(`[pi-notify-telegram] Cannot normalize state: ${errorMessage(error)}`));
   state.cleanupTimer = setInterval(() => {
@@ -592,7 +803,8 @@ async function startLocalLeader(secret) {
     }
   }, STATE_CLEANUP_INTERVAL_MS);
   state.cleanupTimer.unref?.();
-  const server = net.createServer((socket) => {
+
+  server.on("connection", (socket) => {
     socket.setNoDelay(true);
     const client = { socket, registered: false };
     attachLineReader(socket, (message) => handleBrokerRequest(state, client, message), () => socket.destroy());
@@ -601,29 +813,38 @@ async function startLocalLeader(secret) {
       if (client.sessionId && state.clientsBySession.get(client.sessionId) === client) state.clientsBySession.delete(client.sessionId);
     });
     socket.on("error", () => {});
+    socket.resume();
   });
+  server.on("error", (error) => console.warn(`[pi-notify-telegram] Broker error: ${errorMessage(error)}`));
+  server.on("close", () => {
+    state.closed = true;
+    if (state.cleanupTimer) clearInterval(state.cleanupTimer);
+    localLeaderPromise = undefined;
+  });
+  server.unref?.();
+  pollTelegram(state).catch((error) => console.warn(`[pi-notify-telegram] Poller stopped: ${errorMessage(error)}`));
+  return state;
+}
 
-  return new Promise((resolve, reject) => {
-    const onBindError = (error) => {
-      if (state.cleanupTimer) clearInterval(state.cleanupTimer);
-      if (error?.code === "EADDRINUSE") resolve(undefined);
-      else reject(error);
-    };
-    server.once("error", onBindError);
-    server.listen(secret.port, "127.0.0.1", () => {
-      server.off("error", onBindError);
-      server.on("error", (error) => console.warn(`[pi-notify-telegram] Broker error: ${errorMessage(error)}`));
-      server.on("close", () => {
-        state.closed = true;
-        if (state.cleanupTimer) clearInterval(state.cleanupTimer);
-        localLeaderPromise = undefined;
+async function launchDetachedWakeDaemon() {
+  if (!daemonLaunchPromise) {
+    daemonLaunchPromise = new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [DAEMON_PATH], {
+        detached: true,
+        env: { ...process.env, PI_TELEGRAM_DAEMON: "1" },
+        stdio: "ignore",
+        windowsHide: true,
       });
-      server.unref?.();
-      state.server = server;
-      pollTelegram(state).catch((error) => console.warn(`[pi-notify-telegram] Poller stopped: ${errorMessage(error)}`));
-      resolve(state);
+      child.once("spawn", () => {
+        child.unref();
+        resolve();
+      });
+      child.once("error", reject);
+    }).finally(() => {
+      daemonLaunchPromise = undefined;
     });
-  });
+  }
+  return daemonLaunchPromise;
 }
 
 async function ensureLocalLeader(secret) {
@@ -649,6 +870,7 @@ function registerClient(state) {
     sessionId: state.sessionId,
     cwd: state.cwd,
     sessionName: state.sessionName,
+    wakeChild: process.env.PI_TELEGRAM_WAKE_CHILD === "1",
   });
 }
 
@@ -722,6 +944,14 @@ async function connectClient(state) {
     try {
       await attempt();
     } catch (firstError) {
+      if (state.secret.wakeMode && process.env.PI_TELEGRAM_DAEMON !== "1") {
+        await launchDetachedWakeDaemon();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        try {
+          await attempt();
+          return;
+        } catch {}
+      }
       await ensureLocalLeader(state.secret);
       await new Promise((resolve) => setTimeout(resolve, 100));
       try {
@@ -1025,8 +1255,32 @@ async function notify(pi, ctx, notification, title, body) {
   await requestNotification(state, title, body);
 }
 
+async function runWakeDaemon() {
+  const secret = await readSecret();
+  if (!secret.wakeMode) throw new Error("wakeMode is disabled in pi-notify-telegram.json");
+  let stopping = false;
+  for (;;) {
+    const leader = await startLocalLeader(secret);
+    if (!leader) {
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      continue;
+    }
+    const stop = () => {
+      stopping = true;
+      leader.server?.close();
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    await new Promise((resolve) => leader.server.once("close", resolve));
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
+    if (stopping) return;
+  }
+}
+
 module.exports = Object.freeze({
   attach,
   notify,
-  __test: Object.freeze({ assistantText, findReplyTarget, pruneExpiredBrokerState, splitTelegramText, telegramFormattedCall, topicName, validateSettings }),
+  runWakeDaemon,
+  __test: Object.freeze({ assistantText, findReplyTarget, handleControlMessage, pruneExpiredBrokerState, splitTelegramText, startLocalLeader, telegramFormattedCall, topicName, validateSettings }),
 });

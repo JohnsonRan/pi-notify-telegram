@@ -1,11 +1,13 @@
 {
   "name": "pi-notify-telegram",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Threaded Telegram remote interface for Pi sessions with native streaming and notification replies",
   "type": "module",
   "files": [
     "index.ts",
     "src",
+    "daemon.cjs",
+    "service.cjs",
     "setup.cjs",
     "README.md",
     "LICENSE"

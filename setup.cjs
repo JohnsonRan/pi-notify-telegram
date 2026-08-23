@@ -140,6 +140,11 @@ async function main() {
       bridgeSecret: randomBytes(32).toString("hex"),
       port: DEFAULT_PORT,
       linkPreview: false,
+      wakeMode: false,
+      wakeDefaultCwd: "",
+      wakeAllowedRoots: [],
+      wakePiCommand: "pi",
+      wakePiCommandArgs: [],
     };
     let state = { offset, mappings: [], pendingReplies: [], topics: [] };
     try {

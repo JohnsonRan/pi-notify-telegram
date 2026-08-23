@@ -12,6 +12,9 @@ Each Pi session gets its own topic in the bot's private chat. Telegram replies a
 - Safe Markdown-to-Telegram-HTML rendering for headings, emphasis, code, links, quotes, spoilers, and lists
 - Notification replies become `pi.sendUserMessage()` input
 - Multiple concurrent Pi processes share one localhost broker and one `getUpdates` poller
+- Optional always-on wake daemon resumes a stopped Pi session when its topic receives a message
+- The unthreaded All Topics view provides explicit `/new`, `/sessions`, `/status`, and `/help` control commands
+- Cross-platform per-user services support Windows Scheduled Tasks, macOS LaunchAgents, and Linux systemd user units
 - Replies route by `message_thread_id`, so agents cannot consume each other's messages
 - Busy sessions receive Telegram input as `steer`; idle sessions start a normal turn
 - Consumes `pi:semantic-hook:v1` notifications from `pi-notify` and other neutral producers
@@ -74,11 +77,57 @@ Example non-secret configuration:
   "allowedUserId": 123456789,
   "bridgeSecret": "generated-random-value",
   "port": 43871,
-  "linkPreview": false
+  "linkPreview": false,
+  "wakeMode": true,
+  "wakeDefaultCwd": "F:\\",
+  "wakeAllowedRoots": ["F:\\"],
+  "wakePiCommand": "pi",
+  "wakePiCommandArgs": []
 }
 ```
 
 `linkPreview` defaults to `false`, which disables URL previews on notifications and persisted assistant messages. Set it to `true` to opt back in. Telegram's ephemeral `sendMessageDraft` method does not expose link preview options.
+
+## Wake daemon
+
+Set `wakeMode` to `true` to let Telegram start Pi when no interactive Pi process owns the target session. `wakeDefaultCwd` is used by `/new | <prompt>`, and every requested working directory must resolve inside one of the `wakeAllowedRoots`. Symbolic links and junctions are resolved before the allowlist check.
+
+The wake process runs Pi with the existing session ID, full tools, and project approval:
+
+```text
+pi --session-id <id> --name <name> --print --approve <prompt>
+```
+
+Only the configured `allowedUserId` can issue wake requests. One background process may run per session; additional messages are delivered through the normal authenticated broker connection.
+
+Install the per-user service from the installed checkout:
+
+```bash
+node "$HOME/.pi/agent/git/github.com/JohnsonRan/pi-notify-telegram/service.cjs" install
+```
+
+The command selects the native service manager for the current platform:
+
+- Windows: per-user Scheduled Task
+- macOS: `~/Library/LaunchAgents/com.johnsonran.pi-notify-telegram.plist`
+- Linux: `~/.config/systemd/user/pi-notify-telegram.service`
+
+Service lifecycle commands are `install`, `start`, `stop`, `status`, and `uninstall`. The daemon waits if an older embedded broker still owns the port, then takes ownership automatically after that Pi process exits.
+
+All Topics is command-only:
+
+```text
+/new F:\\project | inspect this project
+/new F:\\project
+/new | use the configured default directory
+/sessions
+/status
+/help
+```
+
+Messages in an existing session topic wake that exact session. Ordinary unthreaded text never falls back to a globally "latest" session.
+
+Wake mode permits unattended model calls, file writes, and command execution. Keep the bot private and restrict `wakeAllowedRoots` to trusted directories.
 
 ## pi-notify integration
 
