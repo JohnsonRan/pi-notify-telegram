@@ -322,6 +322,58 @@ test("prunes stale mappings and undelivered replies but retains topics", () => {
   assert.equal(runtime.__test.pruneExpiredBrokerState(state, now), false);
 });
 
+test("commits a Telegram update offset only after successful handling", async () => {
+  const state = { offset: 10 };
+  let persists = 0;
+  await assert.rejects(runtime.__test.processTelegramUpdate(state, {
+    update_id: 10,
+    message: { text: "retry me" },
+  }, {
+    handleTelegramMessage: async () => { throw new Error("temporary failure"); },
+    queuePersist: async () => { persists += 1; },
+  }), /temporary failure/);
+  assert.equal(state.offset, 10);
+  assert.equal(persists, 0);
+
+  await runtime.__test.processTelegramUpdate(state, {
+    update_id: 10,
+    message: { text: "retry me" },
+  }, {
+    handleTelegramMessage: async () => {},
+    queuePersist: async () => { persists += 1; },
+  });
+  assert.equal(state.offset, 11);
+  assert.equal(persists, 1);
+});
+
+test("closes broker clients before stopping the leader", async () => {
+  let serverClosed = false;
+  let closeAllCalled = false;
+  let socketDestroyed = false;
+  const socket = { destroy() { socketDestroyed = true; } };
+  const state = {
+    closed: false,
+    pollController: { abort() { state.pollAborted = true; } },
+    cleanupTimer: setInterval(() => {}, 10_000),
+    pendingReplies: new Map([["pending", { retryTimer: setTimeout(() => {}, 10_000) }]]),
+    clients: new Map([["client", { socket }]]),
+    clientsBySession: new Map([["session", { socket }]]),
+    server: {
+      listening: true,
+      close(callback) { serverClosed = true; this.listening = false; callback(); },
+      closeAllConnections() { closeAllCalled = true; },
+    },
+  };
+  await runtime.__test.closeLeader(state);
+  assert.equal(state.closed, true);
+  assert.equal(state.pollAborted, true);
+  assert.equal(socketDestroyed, true);
+  assert.equal(serverClosed, true);
+  assert.equal(closeAllCalled, true);
+  assert.equal(state.clients.size, 0);
+  assert.equal(state.clientsBySession.size, 0);
+});
+
 test("stream queue cleanup does not create an unhandled rejection", async () => {
   const state = { streamQueues: new Map() };
   const failure = runtime.__test.enqueueStream(state, "session", async () => {

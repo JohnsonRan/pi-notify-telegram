@@ -5,12 +5,11 @@ const { mkdirSync, rmSync, writeFileSync } = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { daemonLogPath } = require("./src/daemon-log.cjs");
+const { AGENT_DIR, WINDOWS_DAEMON_MARKER } = require("./src/paths.cjs");
 
 const SERVICE_NAME = "pi-notify-telegram";
 const WINDOWS_TASK = "PiNotifyTelegram";
-const WINDOWS_DAEMON_MARKER = "--pi-notify-telegram-service-daemon";
 const MAC_LABEL = "com.johnsonran.pi-notify-telegram";
-const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(process.env.USERPROFILE || process.env.HOME, ".pi", "agent");
 const DAEMON_PATH = path.join(__dirname, "daemon.cjs");
 const WINDOWS_DAEMON_LAUNCHER_PATH = path.join(__dirname, "daemon-windows.vbs");
 

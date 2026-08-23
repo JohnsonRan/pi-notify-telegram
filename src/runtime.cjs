@@ -18,16 +18,12 @@ const {
   renderTelegramHtml,
   splitMarkdown,
 } = require("./format.cjs");
+const { AGENT_DIR, CONFIG_PATH, DEFAULT_PORT, SECRET_PATH, STATE_PATH, WINDOWS_DAEMON_MARKER } = require("./paths.cjs");
 const { formatLocalTimestamp } = require("./time.cjs");
 const { WakeLauncher, parseControlCommand, resolveWakeCwd } = require("./wake.cjs");
 const { version: PACKAGE_VERSION } = require("../package.json");
 
-const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(process.env.USERPROFILE || process.env.HOME, ".pi", "agent");
-const SECRET_PATH = path.join(AGENT_DIR, "pi-notify-telegram.secret");
-const CONFIG_PATH = path.join(AGENT_DIR, "pi-notify-telegram.json");
-const STATE_PATH = path.join(AGENT_DIR, "pi-notify-telegram.state.json");
 const DAEMON_PATH = path.join(__dirname, "..", "daemon.cjs");
-const DEFAULT_PORT = 43871;
 const MAX_LINE_BYTES = 256 * 1024;
 const MAX_MAPPINGS = 200;
 const MAX_PENDING_REPLIES = 1000;
@@ -266,15 +262,16 @@ async function readSecret() {
   }
 }
 
-async function telegramCall(secret, method, payload, timeoutMs = 20_000) {
+async function telegramCall(secret, method, payload, timeoutMs = 20_000, externalSignal) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let response;
     try {
+      const timeoutSignal = AbortSignal.timeout(timeoutMs);
       response = await fetch(`https://api.telegram.org/bot${secret.botToken}/${method}`, {
         method: "POST",
         headers: { "content-type": "application/json; charset=utf-8" },
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: externalSignal ? AbortSignal.any([timeoutSignal, externalSignal]) : timeoutSignal,
       });
     } catch (error) {
       throw new Error(`Telegram ${method} failed: ${errorMessage(error)}`);
@@ -860,26 +857,33 @@ async function handleCallbackQuery(state, query, options = {}) {
   });
 }
 
+async function processTelegramUpdate(state, update, options = {}) {
+  if (!Number.isSafeInteger(update?.update_id)) return false;
+  if (update.message) await (options.handleTelegramMessage || handleTelegramMessage)(state, update.message);
+  if (update.callback_query) await (options.handleCallbackQuery || handleCallbackQuery)(state, update.callback_query);
+  state.offset = Math.max(state.offset, update.update_id + 1);
+  await (options.queuePersist || queuePersist)(state);
+  return true;
+}
+
 async function pollTelegram(state) {
   while (!state.closed) {
+    const controller = new AbortController();
+    state.pollController = controller;
     try {
       const updates = await telegramCall(state.secret, "getUpdates", {
         offset: state.offset,
         timeout: 25,
         allowed_updates: ["message", "callback_query"],
-      }, 35_000);
-      for (const update of updates) {
-        if (!Number.isSafeInteger(update?.update_id)) continue;
-        state.offset = Math.max(state.offset, update.update_id + 1);
-        if (update.message) await handleTelegramMessage(state, update.message);
-        if (update.callback_query) await handleCallbackQuery(state, update.callback_query);
-      }
-      if (updates.length > 0) await queuePersist(state);
+      }, 35_000, controller.signal);
+      for (const update of updates) await processTelegramUpdate(state, update);
     } catch (error) {
       if (!state.closed) {
         console.warn(`[pi-notify-telegram] Poll failed: ${errorMessage(error)}`);
         await new Promise((resolve) => setTimeout(resolve, 3_000));
       }
+    } finally {
+      if (state.pollController === controller) state.pollController = undefined;
     }
   }
 }
@@ -1089,6 +1093,29 @@ function handleBrokerRequest(state, client, message) {
   });
 }
 
+function closeLeader(state) {
+  if (state.closePromise) return state.closePromise;
+  state.closed = true;
+  state.pollController?.abort();
+  if (state.cleanupTimer) clearInterval(state.cleanupTimer);
+  for (const pending of state.pendingReplies.values()) {
+    if (pending.retryTimer) clearTimeout(pending.retryTimer);
+  }
+  const sockets = new Set([...state.clients.values()].map((client) => client.socket));
+  for (const socket of sockets) socket.destroy();
+  state.clients.clear();
+  state.clientsBySession.clear();
+  state.closePromise = new Promise((resolve, reject) => {
+    if (!state.server.listening) {
+      resolve();
+      return;
+    }
+    state.server.close((error) => error ? reject(error) : resolve());
+    state.server.closeAllConnections?.();
+  });
+  return state.closePromise;
+}
+
 async function startLocalLeader(secret) {
   const server = net.createServer({ pauseOnConnect: true });
   const acquired = await new Promise((resolve, reject) => {
@@ -1131,6 +1158,8 @@ async function startLocalLeader(secret) {
     wakeLauncher: undefined,
     persistQueue: Promise.resolve(),
     cleanupTimer: undefined,
+    pollController: undefined,
+    closePromise: undefined,
     closed: false,
     server,
   };
@@ -1187,7 +1216,7 @@ async function startLocalLeader(secret) {
 async function launchDetachedWakeDaemon() {
   if (!daemonLaunchPromise) {
     daemonLaunchPromise = new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [DAEMON_PATH], {
+      const child = spawn(process.execPath, [DAEMON_PATH, WINDOWS_DAEMON_MARKER], {
         detached: true,
         env: { ...process.env, PI_TELEGRAM_DAEMON: "1" },
         stdio: "ignore",
@@ -1801,7 +1830,7 @@ async function runWakeDaemon() {
     }
     const stop = () => {
       stopping = true;
-      leader.server?.close();
+      closeLeader(leader).catch((error) => console.warn(`[pi-notify-telegram] Cannot stop broker cleanly: ${errorMessage(error)}`));
     };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
@@ -1816,5 +1845,5 @@ module.exports = Object.freeze({
   attach,
   notify,
   runWakeDaemon,
-  __test: Object.freeze({ RESTORE_CONTEXT_PROMPT, assistantText, controlKeyboard, controlPanel, enqueueStream, findReplyTarget, formatBrokerStatus, formatDuration, formatLiveStatus, formatLocalTimestamp, formatWakeExitDetail, handleCallbackQuery, handleControlMessage, normalizePiCommands, parseControlCallback, parseRestoreCallback, pruneExpiredBrokerState, restoreSessionTopic, splitTelegramText, startLocalLeader, subagentProgress, summarizeToolArgs, telegramCall, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStability, waitForWakeStop }),
+  __test: Object.freeze({ RESTORE_CONTEXT_PROMPT, assistantText, closeLeader, controlKeyboard, controlPanel, enqueueStream, findReplyTarget, formatBrokerStatus, formatDuration, formatLiveStatus, formatLocalTimestamp, formatWakeExitDetail, handleCallbackQuery, handleControlMessage, normalizePiCommands, parseControlCallback, parseRestoreCallback, processTelegramUpdate, pruneExpiredBrokerState, restoreSessionTopic, splitTelegramText, startLocalLeader, subagentProgress, summarizeToolArgs, telegramCall, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStability, waitForWakeStop }),
 });
