@@ -56,6 +56,11 @@ const CONTROL_COMMANDS = Object.freeze([
 ]);
 const CONTROL_CALLBACK_PREFIX = "control:";
 const CONTROL_PANEL_COMMANDS = new Set(["help", "sessions", "status"]);
+const RESTORE_CONTEXT_PROMPT = [
+  "Resume this existing Pi session and provide a concise context recap.",
+  "Summarize the current objective, key decisions, completed work, and open next steps.",
+  "Do not modify files or run tools for this recap.",
+].join(" ");
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
@@ -99,7 +104,7 @@ function controlKeyboard(command, topics = []) {
   }
   if (command === "sessions") {
     const sessionButtons = topics.map((topic) => [{
-      text: `Restore ${String(topic.name || topic.sessionId.slice(0, 8)).slice(0, 48)}`,
+      text: `Restore + recap ${String(topic.name || topic.sessionId.slice(0, 8)).slice(0, 40)}`,
       callback_data: `restore:${topic.sessionId}`,
     }]);
     return {
@@ -757,7 +762,51 @@ async function handleTelegramMessage(state, message) {
   }
 }
 
-async function handleCallbackQuery(state, query) {
+async function restoreSessionTopic(state, restoreTopic, options = {}) {
+  const retryTopic = options.withTopicRetry || withTopicRetry;
+  const sendText = options.sendBrokerText || sendBrokerText;
+  const findConnected = options.connectedTarget || connectedTarget;
+  const queueReply = options.queueTelegramReply || queueTelegramReply;
+  const launchSession = options.launchWakeSession || launchWakeSession;
+  return retryTopic(
+    state,
+    restoreTopic.sessionId,
+    restoreTopic.cwd,
+    restoreTopic.name,
+    async (topic) => {
+      const notice = await sendText(state, [
+        `Restoring Pi session ${topic.sessionId.slice(0, 8)}…`,
+        "Telegram cannot switch topics automatically; open this unread topic to continue.",
+        "Pi will post a concise recap of the recovered context.",
+      ].join("\n"), { threadId: topic.threadId });
+      const message = {
+        text: RESTORE_CONTEXT_PROMPT,
+        message_id: notice?.message_id,
+        message_thread_id: topic.threadId,
+      };
+      const target = { sessionId: topic.sessionId, threadId: topic.threadId };
+
+      if (findConnected(state, topic.sessionId)) {
+        return queueReply(state, target, message);
+      }
+      if (state.wakeLauncher.isRunning(topic.sessionId) || state.wakeReservations.has(topic.sessionId)) {
+        return queueReply(state, target, message, true);
+      }
+
+      const launched = await launchSession(state, topic, RESTORE_CONTEXT_PROMPT, notice?.message_id);
+      if (launched.started) return launched;
+      if (findConnected(state, topic.sessionId) || launched.connected) {
+        return queueReply(state, target, message);
+      }
+      if (launched.reserved || state.wakeLauncher.isRunning(topic.sessionId)) {
+        return queueReply(state, target, message, true);
+      }
+      throw new Error("The Pi session did not start");
+    },
+  );
+}
+
+async function handleCallbackQuery(state, query, options = {}) {
   if (!query || typeof query.id !== "string") return;
   const authorized = query.message?.chat?.id === state.secret.chatId && query.from?.id === state.secret.allowedUserId;
   const command = authorized ? parseControlCallback(query.data) : undefined;
@@ -767,22 +816,16 @@ async function handleCallbackQuery(state, query) {
     callback_query_id: query.id,
     ...(!authorized ? { text: "Not allowed.", show_alert: true } : {}),
     ...(authorized && !command && !restoreTopic ? { text: "This button is no longer available." } : {}),
-    ...(restoreTopic ? { text: `Restoring ${restoreTopic.name || restoreTopic.sessionId.slice(0, 8)}…` } : {}),
+    ...(restoreTopic ? {
+      text: "Telegram cannot open topics automatically. Open the unread topic to see the restored context recap.",
+      show_alert: true,
+    } : {}),
   }).catch((error) => console.warn(`[pi-notify-telegram] Cannot answer callback: ${errorMessage(error)}`));
   if (!authorized) return;
 
   if (restoreTopic) {
     try {
-      await withTopicRetry(
-        state,
-        restoreTopic.sessionId,
-        restoreTopic.cwd,
-        restoreTopic.name,
-        (topic) => sendBrokerText(state, [
-          `Restored Pi session ${topic.sessionId.slice(0, 8)}.`,
-          "Send a message in this topic to resume it on the host.",
-        ].join("\n"), { threadId: topic.threadId }),
-      );
+      await (options.restoreSessionTopic || restoreSessionTopic)(state, restoreTopic);
     } catch (error) {
       await sendBrokerText(state, `Could not restore Pi session: ${errorMessage(error)}`, {
         ...(Number.isSafeInteger(query.message?.message_thread_id) ? { threadId: query.message.message_thread_id } : {}),
@@ -1762,5 +1805,5 @@ module.exports = Object.freeze({
   attach,
   notify,
   runWakeDaemon,
-  __test: Object.freeze({ assistantText, controlKeyboard, controlPanel, findReplyTarget, formatBrokerStatus, formatDuration, formatLiveStatus, formatWakeExitDetail, handleCallbackQuery, handleControlMessage, normalizePiCommands, parseControlCallback, parseRestoreCallback, pruneExpiredBrokerState, splitTelegramText, startLocalLeader, subagentProgress, summarizeToolArgs, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStability, waitForWakeStop }),
+  __test: Object.freeze({ RESTORE_CONTEXT_PROMPT, assistantText, controlKeyboard, controlPanel, findReplyTarget, formatBrokerStatus, formatDuration, formatLiveStatus, formatWakeExitDetail, handleCallbackQuery, handleControlMessage, normalizePiCommands, parseControlCallback, parseRestoreCallback, pruneExpiredBrokerState, restoreSessionTopic, splitTelegramText, startLocalLeader, subagentProgress, summarizeToolArgs, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStability, waitForWakeStop }),
 });

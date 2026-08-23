@@ -115,6 +115,7 @@ test("builds Telegram control panels with inline buttons", () => {
 test("answers and applies authorized Telegram control callbacks", async () => {
   const originalFetch = global.fetch;
   const calls = [];
+  const restored = [];
   global.fetch = async (url, options) => {
     calls.push({ method: url.split("/").pop(), body: JSON.parse(options.body) });
     return { ok: true, status: 200, json: async () => ({ ok: true, result: true }) };
@@ -152,6 +153,8 @@ test("answers and applies authorized Telegram control callbacks", async () => {
       data: "restore:12345678-1234-1234-1234-123456789abc",
       from: { id: 7 },
       message: { message_id: 99, chat: { id: 42 } },
+    }, {
+      restoreSessionTopic: async (_state, topic) => restored.push(topic.sessionId),
     });
   } finally {
     global.fetch = originalFetch;
@@ -161,13 +164,85 @@ test("answers and applies authorized Telegram control callbacks", async () => {
     "editMessageText",
     "answerCallbackQuery",
     "answerCallbackQuery",
-    "sendMessage",
   ]);
   assert.equal(calls[1].body.message_id, 99);
   assert.equal(calls[1].body.reply_markup.inline_keyboard[0][0].callback_data, "control:status");
   assert.equal(calls[2].body.show_alert, true);
-  assert.equal(calls[4].body.message_thread_id, 77);
-  assert.match(calls[4].body.text, /Send a message in this topic to resume it on the host/);
+  assert.equal(calls[3].body.show_alert, true);
+  assert.match(calls[3].body.text, /cannot open topics automatically/);
+  assert.deepEqual(restored, ["12345678-1234-1234-1234-123456789abc"]);
+  assert.match(runtime.__test.RESTORE_CONTEXT_PROMPT, /key decisions/);
+  assert.match(runtime.__test.RESTORE_CONTEXT_PROMPT, /Do not modify files or run tools/);
+});
+
+test("restore wakes the exact session with a context recap", async () => {
+  const calls = [];
+  const topic = {
+    sessionId: "12345678-1234-1234-1234-123456789abc",
+    threadId: 77,
+    name: "Demo",
+    cwd: process.cwd(),
+  };
+  const state = {
+    wakeLauncher: { isRunning: () => false },
+    wakeReservations: new Set(),
+  };
+  const options = {
+    withTopicRetry: async (_state, sessionId, cwd, name, operation) => {
+      assert.equal(sessionId, topic.sessionId);
+      assert.equal(cwd, topic.cwd);
+      assert.equal(name, topic.name);
+      return operation(topic);
+    },
+    sendBrokerText: async (_state, text, sendOptions) => {
+      calls.push({ type: "notice", text, options: sendOptions });
+      return { message_id: 88 };
+    },
+    connectedTarget: () => undefined,
+    queueTelegramReply: async () => assert.fail("a newly launched session should receive the recap as its startup prompt"),
+    launchWakeSession: async (_state, launchedTopic, prompt, replyTo) => {
+      calls.push({ type: "launch", topic: launchedTopic, prompt, replyTo });
+      return { started: true, foreground: false };
+    },
+  };
+
+  await runtime.__test.restoreSessionTopic(state, topic, options);
+  assert.equal(calls[0].options.threadId, 77);
+  assert.match(calls[0].text, /cannot switch topics automatically/);
+  assert.equal(calls[1].topic, topic);
+  assert.equal(calls[1].prompt, runtime.__test.RESTORE_CONTEXT_PROMPT);
+  assert.equal(calls[1].replyTo, 88);
+});
+
+test("restore injects the recap into an already connected session", async () => {
+  const queued = [];
+  const topic = {
+    sessionId: "12345678-1234-1234-1234-123456789abc",
+    threadId: 77,
+    name: "Demo",
+    cwd: process.cwd(),
+  };
+  const state = {
+    wakeLauncher: { isRunning: () => false },
+    wakeReservations: new Set(),
+  };
+
+  await runtime.__test.restoreSessionTopic(state, topic, {
+    withTopicRetry: async (_state, _sessionId, _cwd, _name, operation) => operation(topic),
+    sendBrokerText: async () => ({ message_id: 88 }),
+    connectedTarget: () => ({ registered: true }),
+    queueTelegramReply: async (_state, target, message, holdForWake) => {
+      queued.push({ target, message, holdForWake });
+      return { delivered: true };
+    },
+    launchWakeSession: async () => assert.fail("an already connected session should not be launched again"),
+  });
+
+  assert.equal(queued.length, 1);
+  assert.deepEqual(queued[0].target, { sessionId: topic.sessionId, threadId: 77 });
+  assert.equal(queued[0].message.text, runtime.__test.RESTORE_CONTEXT_PROMPT);
+  assert.equal(queued[0].message.message_id, 88);
+  assert.equal(queued[0].holdForWake, undefined);
 });
 
 test("formats bounded wake process diagnostics for Telegram", () => {

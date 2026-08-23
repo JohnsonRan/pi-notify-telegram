@@ -141,7 +141,7 @@ All Topics is command-only:
 /help
 ```
 
-The `/help`, `/status`, and `/sessions` responses include inline buttons for switching between the control views and refreshing live status without typing another command. Known sessions also get `Restore` buttons: pressing one verifies the saved topic, recreates it if it was deleted, and posts a short prompt in that topic so the next message can resume the same host Pi session. Callback actions are restricted to the configured chat and allowed user.
+The `/help`, `/status`, and `/sessions` responses include inline buttons for switching between the control views and refreshing live status without typing another command. Known sessions also get `Restore + recap` buttons: pressing one verifies the saved topic, recreates it if it was deleted, resumes the exact host Pi session, and asks Pi to post a concise recap of the recovered objective, decisions, completed work, and next steps. Telegram does not provide a Bot API method or supported private-topic deep link that can force the client to navigate into an existing topic, so the restored topic is marked unread and the callback tells the user to open it. Callback actions are restricted to the configured chat and allowed user.
 
 Messages in an existing session topic wake that exact session. Ordinary unthreaded text never falls back to a globally "latest" session.
 
