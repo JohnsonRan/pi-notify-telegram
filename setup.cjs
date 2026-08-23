@@ -77,6 +77,24 @@ function hiddenQuestion(prompt) {
   });
 }
 
+function preserveOperationalConfig(config, previousConfig) {
+  const validators = {
+    port: (value) => Number.isInteger(value) && value > 0 && value <= 65535,
+    linkPreview: (value) => typeof value === "boolean",
+    wakeMode: (value) => typeof value === "boolean",
+    wakeDefaultCwd: (value) => typeof value === "string",
+    wakeAllowedRoots: (value) => Array.isArray(value) && value.every((root) => typeof root === "string"),
+    wakePiCommand: (value) => typeof value === "string" && value.length > 0,
+    wakePiCommandArgs: (value) => Array.isArray(value) && value.every((argument) => typeof argument === "string"),
+    wakeOpenTerminal: (value) => typeof value === "boolean",
+  };
+
+  for (const [key, isValid] of Object.entries(validators)) {
+    if (isValid(previousConfig[key])) config[key] = previousConfig[key];
+  }
+  return config;
+}
+
 async function main() {
   if (await brokerIsRunning()) {
     throw new Error("The Telegram broker is running. Stop all Pi sessions before running setup.");
@@ -154,6 +172,7 @@ async function main() {
         readFile(STATE_PATH, "utf8").then(JSON.parse),
       ]);
       if (previousConfig.chatId === selected.chat.id && previousConfig.allowedUserId === selected.from.id) {
+        preserveOperationalConfig(config, previousConfig);
         state = {
           offset: Math.max(offset, Number(previousState.offset) || 0),
           mappings: Array.isArray(previousState.mappings) ? previousState.mappings : [],
@@ -182,7 +201,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(`Setup failed: ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    process.stderr.write(`Setup failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = Object.freeze({ preserveOperationalConfig });
