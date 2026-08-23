@@ -102,6 +102,7 @@ class WakeLauncher {
     this.terminalEnvironment = options.terminalEnvironment || this.processEnvironment;
     this.findExecutable = options.findExecutable;
     this.killTree = typeof options.killTree === "function" ? options.killTree : killWindowsProcessTree;
+    this.terminalCancelGraceMs = Number.isFinite(options.terminalCancelGraceMs) ? Math.max(0, options.terminalCancelGraceMs) : 3_000;
     this.running = new Map();
     this.cancelled = new Set();
     this.onExit = typeof options.onExit === "function" ? options.onExit : () => {};
@@ -121,21 +122,28 @@ class WakeLauncher {
     this.cancelled.add(sessionId);
     if (child.terminalCancelPath) {
       try { writeFileSync(child.terminalCancelPath, "cancel\n", { mode: 0o600 }); } catch {}
+      child.terminalCancelTimer = setTimeout(() => {
+        if (this.running.get(sessionId) !== child) return;
+        let terminalPid;
+        try {
+          terminalPid = Number(readFileSync(child.terminalPidPath, "utf8"));
+        } catch {}
+        if (Number.isInteger(terminalPid) && terminalPid > 0) {
+          if (this.platform === "win32") this.killTree(terminalPid);
+          else {
+            try { process.kill(terminalPid, "SIGTERM"); } catch { child.kill(); }
+          }
+        } else if (this.platform === "win32" && Number.isInteger(child.pid)) {
+          this.killTree(child.pid);
+        } else {
+          child.kill();
+        }
+      }, this.terminalCancelGraceMs);
+      child.terminalCancelTimer.unref?.();
+      return true;
     }
-    let terminalPid;
-    try {
-      terminalPid = Number(readFileSync(child.terminalPidPath, "utf8"));
-    } catch {}
-    if (Number.isInteger(terminalPid) && terminalPid > 0) {
-      if (this.platform === "win32") this.killTree(terminalPid);
-      else {
-        try { process.kill(terminalPid, "SIGTERM"); } catch { child.kill(); }
-      }
-    } else if (this.openTerminal && this.platform === "win32" && Number.isInteger(child.pid)) {
-      this.killTree(child.pid);
-    } else {
-      child.kill();
-    }
+    if (this.platform === "win32" && Number.isInteger(child.pid)) this.killTree(child.pid);
+    else child.kill();
     return true;
   }
 
@@ -230,6 +238,7 @@ class WakeLauncher {
       const effectiveSignal = terminalResult?.signal || signal;
       if (terminalResult?.error) stderr = appendBoundedText(stderr, `\n${terminalResult.error}`);
       const cancelled = this.cancelled.delete(sessionId);
+      if (child.terminalCancelTimer) clearTimeout(child.terminalCancelTimer);
       if (terminalSpecPath) {
         unlink(terminalSpecPath).catch(() => {});
         unlink(`${terminalSpecPath}.pid`).catch(() => {});

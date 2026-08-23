@@ -38,7 +38,11 @@ function readSpec() {
     resultPath = String(spec.resultPath || `${specPath}.result`);
     pidPath = `${specPath}.pid`;
     writeFileSync(pidPath, String(process.pid), { mode: 0o600 });
-    if (existsSync(cancelPath)) throw new Error("Telegram terminal launch was cancelled");
+    if (existsSync(cancelPath)) {
+      const error = new Error("Telegram terminal launch was cancelled");
+      error.code = "PI_TELEGRAM_LAUNCH_CANCELLED";
+      throw error;
+    }
     return spec;
   } finally {
     rmSync(specPath, { force: true });
@@ -78,7 +82,9 @@ async function main() {
     process.off("SIGINT", cancelChild);
     process.off("SIGTERM", cancelChild);
     writeResult(result);
-    if (result.signal) {
+    if (cancellationRequested) {
+      process.exitCode = 0;
+    } else if (result.signal) {
       process.stderr.write(`Pi exited from signal ${result.signal}.\n`);
       process.exitCode = 1;
     } else {
@@ -86,11 +92,16 @@ async function main() {
     }
     if (process.exitCode !== 0 && !cancellationRequested) await waitForEnterAfterError();
   } catch (error) {
-    const detail = error instanceof Error ? error.stack || error.message : String(error);
-    writeResult({ code: 1, signal: null, error: detail });
-    process.stderr.write(`${detail}\n`);
-    process.exitCode = 1;
-    await waitForEnterAfterError();
+    if (error?.code === "PI_TELEGRAM_LAUNCH_CANCELLED") {
+      writeResult({ code: 0, signal: null, cancelled: true });
+      process.exitCode = 0;
+    } else {
+      const detail = error instanceof Error ? error.stack || error.message : String(error);
+      writeResult({ code: 1, signal: null, error: detail });
+      process.stderr.write(`${detail}\n`);
+      process.exitCode = 1;
+      await waitForEnterAfterError();
+    }
   } finally {
     if (cancelTimer) clearInterval(cancelTimer);
     if (pidPath) rmSync(pidPath, { force: true });

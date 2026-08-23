@@ -99,6 +99,34 @@ test("terminal host runs Pi with the stored cwd and environment", () => {
   }
 });
 
+test("terminal host exits quietly when fallback cancels before Pi starts", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "pi-terminal-host-cancel-test-"));
+  const marker = path.join(directory, "started.txt");
+  const fake = path.join(directory, "fake.cjs");
+  const specPath = path.join(directory, "wake.json");
+  writeFileSync(fake, `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "started");\n`);
+  writeFileSync(specPath, JSON.stringify({
+    command: process.execPath,
+    args: [fake],
+    cwd: directory,
+    cancelPath: `${specPath}.cancel`,
+    resultPath: `${specPath}.result`,
+  }));
+  writeFileSync(`${specPath}.cancel`, "cancel\n");
+  try {
+    const child = spawnSync(process.execPath, [path.resolve(__dirname, "../src/terminal-host.cjs"), specPath], {
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(child.stderr, "");
+    assert.equal(existsSync(marker), false);
+    assert.deepEqual(JSON.parse(readFileSync(`${specPath}.result`, "utf8")), { code: 0, signal: null, cancelled: true });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("terminal host waits for Enter after an interactive error", async () => {
   const input = new PassThrough();
   const output = new PassThrough();

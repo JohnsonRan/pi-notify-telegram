@@ -107,6 +107,7 @@ test("opens an interactive Pi process through a tracked Windows terminal host", 
     nodeCommand: "C:\\Node\\node.exe",
     terminalHostPath: "C:\\Package\\terminal-host.cjs",
     powershell: "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+    terminalCancelGraceMs: 20,
     killTree(pid) {
       killed.push(pid);
     },
@@ -140,8 +141,37 @@ test("opens an interactive Pi process through a tracked Windows terminal host", 
   assert.equal(launched.terminal, "Windows Console");
   await writeFile(`${specPath}.pid`, "9876");
   assert.equal(launcher.cancel("terminal-session"), true);
-  assert.deepEqual(killed, [9876]);
+  assert.equal(await readFile(`${specPath}.cancel`, "utf8"), "cancel\n");
+  assert.deepEqual(killed, []);
   child.emit("close", 0, null);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(killed, []);
+});
+
+test("force-closes an unresponsive Windows terminal after the cancellation grace period", async () => {
+  const killed = [];
+  let child;
+  const launcher = new WakeLauncher({
+    piCommand: "pi-test",
+    openTerminal: true,
+    platform: "win32",
+    terminalCancelGraceMs: 10,
+    killTree(pid) {
+      killed.push(pid);
+    },
+    spawn() {
+      child = new EventEmitter();
+      child.pid = 4321;
+      process.nextTick(() => child.emit("spawn"));
+      return child;
+    },
+  });
+  const launched = await launcher.launch({ sessionId: "stuck-terminal", cwd: process.cwd(), sessionName: "Test", prompt: "hello" });
+  await writeFile(launched.process.terminalPidPath, "9876");
+  assert.equal(launcher.cancel("stuck-terminal"), true);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(killed, [9876]);
+  child.emit("close", 1, null);
 });
 
 test("falls back to headless mode when Linux has no graphical desktop", async () => {
