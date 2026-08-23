@@ -8,6 +8,7 @@ const { daemonLogPath } = require("./src/daemon-log.cjs");
 
 const SERVICE_NAME = "pi-notify-telegram";
 const WINDOWS_TASK = "PiNotifyTelegram";
+const WINDOWS_DAEMON_MARKER = "--pi-notify-telegram-service-daemon";
 const MAC_LABEL = "com.johnsonran.pi-notify-telegram";
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(process.env.USERPROFILE || process.env.HOME, ".pi", "agent");
 const DAEMON_PATH = path.join(__dirname, "daemon.cjs");
@@ -35,7 +36,13 @@ function windowsTaskCommand(nodePath = process.execPath, daemonPath = DAEMON_PAT
 
 function windowsDaemonStopScript(daemonPath = DAEMON_PATH) {
   const target = String(daemonPath).replace(/'/g, "''");
-  return `$target='${target}'; Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -and $_.CommandLine.IndexOf($target, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
+  const marker = WINDOWS_DAEMON_MARKER.replace(/'/g, "''");
+  return `$target='${target}'; $marker='${marker}'; $pattern='(?i)(?:^|\\s)"?' + [regex]::Escape($target) + '"?\\s+' + [regex]::Escape($marker) + '(?:\\s|$)'; Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -match $pattern } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
+}
+
+function windowsTaskStopWaitScript(taskName = WINDOWS_TASK, timeoutMs = 5_000) {
+  const name = String(taskName).replace(/'/g, "''");
+  return `$deadline=(Get-Date).AddMilliseconds(${Math.max(0, Number(timeoutMs) || 0)}); do { $task=Get-ScheduledTask -TaskName '${name}' -ErrorAction SilentlyContinue; if (-not $task -or $task.State -ne 'Running') { exit 0 }; Start-Sleep -Milliseconds 100 } while ((Get-Date) -lt $deadline); throw 'Scheduled task did not stop: ${name}'`;
 }
 
 function windowsTaskXml(
@@ -45,7 +52,7 @@ function windowsTaskXml(
   wscriptPath = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "wscript.exe"),
   launcherPath = WINDOWS_DAEMON_LAUNCHER_PATH,
 ) {
-  const argumentsText = `//B //NoLogo "${launcherPath}" "${nodePath}" "${daemonPath}"`;
+  const argumentsText = `//B //NoLogo "${launcherPath}" "${nodePath}" "${daemonPath}" "${WINDOWS_DAEMON_MARKER}"`;
   return `<?xml version="1.0" encoding="UTF-16"?>\n<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>${xml(userId)}</UserId></LogonTrigger></Triggers>\n<Principals><Principal id="Author"><UserId>${xml(userId)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowStartOnDemand>true</AllowStartOnDemand><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure></Settings>\n<Actions Context="Author"><Exec><Command>${xml(wscriptPath)}</Command><Arguments>${xml(argumentsText)}</Arguments><WorkingDirectory>${xml(path.dirname(daemonPath))}</WorkingDirectory></Exec></Actions>\n</Task>\n`;
 }
 
@@ -64,10 +71,11 @@ function stopWindowsDaemonProcesses() {
 function stopWindows() {
   try { run("schtasks.exe", ["/End", "/TN", WINDOWS_TASK]); } catch {}
   stopWindowsDaemonProcesses();
+  run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", windowsTaskStopWaitScript()]);
 }
 
 function startWindows() {
-  stopWindowsDaemonProcesses();
+  stopWindows();
   run("schtasks.exe", ["/Run", "/TN", WINDOWS_TASK]);
 }
 
@@ -80,7 +88,7 @@ function installWindows() {
   } finally {
     rmSync(file, { force: true });
   }
-  startWindows();
+  run("schtasks.exe", ["/Run", "/TN", WINDOWS_TASK]);
 }
 
 function uninstallWindows() {
@@ -156,4 +164,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = Object.freeze({ launchAgent, serviceAction, systemdUnit, windowsDaemonStopScript, windowsTaskCommand, windowsTaskXml });
+module.exports = Object.freeze({ WINDOWS_DAEMON_MARKER, launchAgent, serviceAction, systemdUnit, windowsDaemonStopScript, windowsTaskCommand, windowsTaskStopWaitScript, windowsTaskXml });

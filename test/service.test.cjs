@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { launchAgent, systemdUnit, windowsDaemonStopScript, windowsTaskCommand, windowsTaskXml } = require("../service.cjs");
+const { WINDOWS_DAEMON_MARKER, launchAgent, systemdUnit, windowsDaemonStopScript, windowsTaskCommand, windowsTaskStopWaitScript, windowsTaskXml } = require("../service.cjs");
 
 test("builds a quoted Windows Scheduled Task command", () => {
   assert.equal(
@@ -17,9 +17,11 @@ test("builds a quoted Windows Scheduled Task command", () => {
 test("stops only the exact Windows daemon process without killing its Pi children", () => {
   const script = windowsDaemonStopScript("C:\\Pi Agent\\daemon's.cjs");
   assert.match(script, /Get-CimInstance Win32_Process/);
-  assert.match(script, /IndexOf\(\$target, \[System\.StringComparison\]::OrdinalIgnoreCase\)/);
+  assert.match(script, /\[regex\]::Escape\(\$target\)/);
+  assert.match(script, /\[regex\]::Escape\(\$marker\)/);
   assert.match(script, /Stop-Process -Id \$_.ProcessId -Force/);
   assert.match(script, /daemon''s\.cjs/);
+  assert.match(script, /--pi-notify-telegram-service-daemon/);
   assert.doesNotMatch(script, /taskkill|\/T\b/i);
 });
 
@@ -28,15 +30,17 @@ test("Windows daemon cleanup preserves child Pi processes", { skip: process.plat
   const fakeDaemon = path.join(directory, "fake daemon.cjs");
   const fakePi = path.join(directory, "fake pi.cjs");
   const marker = path.join(directory, "child-pid.txt");
-  writeFileSync(fakePi, "setInterval(() => {}, 1000);\n");
+  writeFileSync(fakePi, "setInterval(() => process.stderr.write('still running\\n'), 25);\n");
   writeFileSync(fakeDaemon, `
 const { spawn } = require("node:child_process");
-const { writeFileSync } = require("node:fs");
-const child = spawn(process.execPath, [${JSON.stringify(fakePi)}], { detached: true, stdio: ["ignore", "ignore", "pipe"] });
+const { closeSync, openSync, writeFileSync } = require("node:fs");
+const stderrFd = openSync(${JSON.stringify(path.join(directory, "fake-pi.stderr"))}, "a");
+const child = spawn(process.execPath, [${JSON.stringify(fakePi)}], { detached: true, stdio: ["ignore", "ignore", stderrFd] });
+closeSync(stderrFd);
 writeFileSync(${JSON.stringify(marker)}, String(child.pid));
 setInterval(() => {}, 1000);
 `);
-  const daemon = spawn(process.execPath, [fakeDaemon], { stdio: "ignore" });
+  const daemon = spawn(process.execPath, [fakeDaemon, WINDOWS_DAEMON_MARKER], { stdio: "ignore" });
   let childPid;
   try {
     const deadline = Date.now() + 5_000;
@@ -47,7 +51,8 @@ setInterval(() => {}, 1000);
     const exitDeadline = Date.now() + 5_000;
     while (daemon.exitCode === null && Date.now() < exitDeadline) await new Promise((resolve) => setTimeout(resolve, 25));
     assert.notEqual(daemon.exitCode, null, "the daemon process should stop");
-    assert.doesNotThrow(() => process.kill(childPid, 0), "the child Pi process should remain alive");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.doesNotThrow(() => process.kill(childPid, 0), "the child Pi process should remain alive and keep writing stderr");
   } finally {
     if (daemon.exitCode === null) process.kill(daemon.pid);
     if (childPid) {
@@ -55,6 +60,13 @@ setInterval(() => {}, 1000);
     }
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("waits for the Windows Scheduled Task wrapper to stop before restarting", () => {
+  const script = windowsTaskStopWaitScript("Task's Name", 1234);
+  assert.match(script, /Get-ScheduledTask -TaskName 'Task''s Name'/);
+  assert.match(script, /State -ne 'Running'/);
+  assert.match(script, /AddMilliseconds\(1234\)/);
 });
 
 test("builds a hidden supervised unlimited-runtime Windows task", () => {
@@ -70,7 +82,7 @@ test("builds a hidden supervised unlimited-runtime Windows task", () => {
   assert.match(task, /<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/);
   assert.match(task, /<LogonType>InteractiveToken<\/LogonType>/);
   assert.match(task, /<Command>C:\\Windows\\System32\\wscript\.exe<\/Command>/);
-  assert.match(task, /\/\/B \/\/NoLogo &quot;C:\\Pi\\daemon-windows\.vbs&quot; &quot;C:\\node\.exe&quot; &quot;C:\\Pi\\daemon\.cjs&quot;/);
+  assert.match(task, /\/\/B \/\/NoLogo &quot;C:\\Pi\\daemon-windows\.vbs&quot; &quot;C:\\node\.exe&quot; &quot;C:\\Pi\\daemon\.cjs&quot; &quot;--pi-notify-telegram-service-daemon&quot;/);
 });
 
 test("Windows launcher waits for the daemon and returns its exit code", { skip: process.platform !== "win32" }, () => {
@@ -85,6 +97,7 @@ test("Windows launcher waits for the daemon and returns its exit code", { skip: 
       path.resolve(__dirname, "../daemon-windows.vbs"),
       process.execPath,
       fakeDaemon,
+      WINDOWS_DAEMON_MARKER,
     ], { encoding: "utf8", timeout: 30_000 });
     assert.equal(child.status, 7, child.stderr);
     assert.equal(existsSync(marker), true);

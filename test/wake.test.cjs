@@ -1,6 +1,5 @@
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
-const { PassThrough } = require("node:stream");
 const { mkdtemp, mkdir, readFile, realpath, rm, writeFile } = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
@@ -58,7 +57,6 @@ test("launches one full-permission Pi process per session", async () => {
     spawn(command, args, options) {
       child = new EventEmitter();
       child.pid = 123;
-      child.stderr = new PassThrough();
       calls.push({ command, args, options });
       process.nextTick(() => child.emit("spawn"));
       return child;
@@ -80,7 +78,9 @@ test("launches one full-permission Pi process per session", async () => {
   assert.equal(calls[0].options.env.PI_CONTINUE_WATCHDOG_ROOT_PID, undefined);
   assert.equal(calls[0].options.windowsHide, true);
   assert.equal(calls[0].options.detached, true);
-  assert.deepEqual(calls[0].options.stdio, ["ignore", "ignore", "pipe"]);
+  assert.equal(calls[0].options.stdio[0], "ignore");
+  assert.equal(calls[0].options.stdio[1], "ignore");
+  assert.equal(Number.isInteger(calls[0].options.stdio[2]), true);
   child.emit("close", 0, null);
   assert.equal(launcher.isRunning("session-1"), false);
 
@@ -113,7 +113,6 @@ test("opens an interactive Pi process through a tracked Windows terminal host", 
     spawn(command, args, options) {
       child = new EventEmitter();
       child.pid = 4321;
-      child.stderr = new PassThrough();
       calls.push({ command, args, options });
       process.nextTick(() => child.emit("spawn"));
       return child;
@@ -155,7 +154,6 @@ test("falls back to headless mode when Linux has no graphical desktop", async ()
     terminalEnvironment: {},
     spawn(command, args, options) {
       child = new EventEmitter();
-      child.stderr = new PassThrough();
       calls.push({ command, args, options });
       process.nextTick(() => child.emit("spawn"));
       return child;
@@ -175,7 +173,6 @@ test("observes a child that closes immediately after spawning", async () => {
     piCommand: "pi-test",
     spawn() {
       const child = new EventEmitter();
-      child.stderr = new PassThrough();
       process.nextTick(() => {
         child.emit("spawn");
         child.emit("close", 78, null);
@@ -199,7 +196,6 @@ test("keeps bounded wake stderr and includes it in the exit callback", async () 
     piCommand: "pi-test",
     spawn() {
       child = new EventEmitter();
-      child.stderr = new PassThrough();
       child.kill = () => {};
       process.nextTick(() => child.emit("spawn"));
       return child;
@@ -209,7 +205,7 @@ test("keeps bounded wake stderr and includes it in the exit callback", async () 
     },
   });
   await launcher.launch({ sessionId: "session-error", cwd: process.cwd(), sessionName: "Test", prompt: "hello" });
-  child.stderr.end("configuration failed\n");
+  await writeFile(child.wakeStderrPath, "configuration failed\n");
   child.emit("close", 78, null);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(exitResult.code, 78);

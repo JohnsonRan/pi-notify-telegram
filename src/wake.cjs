@@ -1,6 +1,6 @@
 const { execFile, spawn } = require("node:child_process");
 const { randomUUID } = require("node:crypto");
-const { readFileSync, writeFileSync } = require("node:fs");
+const { closeSync, openSync, readFileSync, writeFileSync } = require("node:fs");
 const { mkdir, readdir, realpath, stat, unlink, writeFile } = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
@@ -159,13 +159,14 @@ class WakeLauncher {
       PI_TELEGRAM_WAKE_CHILD: "1",
       PI_TELEGRAM_WAKE_PAYLOAD: wakePayload,
     };
+    await prepareTerminalSpecDir(this.terminalSpecDir);
+    const stderrPath = path.join(this.terminalSpecDir, `wake-${process.pid}-${randomUUID()}.stderr`);
     let launch = { command: this.piCommand, args: backgroundArgs, windowsHide: true };
     let foreground = false;
     let fallbackReason;
     let terminal;
     let terminalSpecPath;
     if (openTerminal) {
-      await prepareTerminalSpecDir(this.terminalSpecDir);
       terminalSpecPath = path.join(this.terminalSpecDir, `wake-${process.pid}-${randomUUID()}.json`);
       const terminalLaunch = createTerminalLaunch(terminalSpecPath, {
         platform: this.platform,
@@ -195,29 +196,36 @@ class WakeLauncher {
         terminal = terminalLaunch.terminal;
       }
     }
-    const child = this.spawn(launch.command, launch.args, {
-      cwd,
-      env: { ...wakeEnv, ...(launch.env || {}) },
-      stdio: ["ignore", "ignore", "pipe"],
-      detached: true,
-      windowsHide: launch.windowsHide,
-    });
+    const stderrFd = openSync(stderrPath, "a", 0o600);
+    let child;
+    try {
+      child = this.spawn(launch.command, launch.args, {
+        cwd,
+        env: { ...wakeEnv, ...(launch.env || {}) },
+        stdio: ["ignore", "ignore", stderrFd],
+        detached: true,
+        windowsHide: launch.windowsHide,
+      });
+    } catch (error) {
+      unlink(stderrPath).catch(() => {});
+      throw error;
+    } finally {
+      closeSync(stderrFd);
+    }
+    child.wakeStderrPath = stderrPath;
     if (terminalSpecPath) {
       child.terminalPidPath = `${terminalSpecPath}.pid`;
       child.terminalCancelPath = `${terminalSpecPath}.cancel`;
       child.terminalResultPath = `${terminalSpecPath}.result`;
     }
-    let stderr = "";
-    child.stderr?.setEncoding?.("utf8");
-    child.stderr?.on?.("data", (chunk) => {
-      stderr = appendBoundedText(stderr, chunk);
-    });
     this.running.set(sessionId, child);
     let spawned = false;
     child.once("close", (code, signal) => {
       if (!spawned) return;
       let terminalResult;
+      let stderr = "";
       try { terminalResult = JSON.parse(readFileSync(child.terminalResultPath, "utf8")); } catch {}
+      try { stderr = appendBoundedText(stderr, readFileSync(stderrPath, "utf8")); } catch {}
       const effectiveCode = Number.isInteger(terminalResult?.code) ? terminalResult.code : code;
       const effectiveSignal = terminalResult?.signal || signal;
       if (terminalResult?.error) stderr = appendBoundedText(stderr, `\n${terminalResult.error}`);
@@ -230,6 +238,7 @@ class WakeLauncher {
         if (cancelled) setTimeout(cancelCleanup, 30_000).unref?.();
         else cancelCleanup();
       }
+      unlink(stderrPath).catch(() => {});
       if (this.running.get(sessionId) === child) this.running.delete(sessionId);
       Promise.resolve(this.onExit({ sessionId, cwd, code: effectiveCode, signal: effectiveSignal, cancelled, stderr: stderr.trim() })).catch(() => {});
     });
