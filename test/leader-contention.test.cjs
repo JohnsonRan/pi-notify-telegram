@@ -3,7 +3,8 @@ const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 const test = require("node:test");
 
-const runtimePath = path.resolve(__dirname, "../src/runtime.cjs");
+const brokerServerPath = path.resolve(__dirname, "../src/broker-server.cjs");
+const settingsPath = path.resolve(__dirname, "../src/settings.cjs");
 
 test("a standby broker never writes state before acquiring the port", () => {
   const script = String.raw`
@@ -19,14 +20,15 @@ process.env.PI_CODING_AGENT_DIR = dir;
 const server = net.createServer();
 server.listen(43992, "127.0.0.1", async () => {
   try {
-    const runtime = require(${JSON.stringify(runtimePath)});
-    const secret = runtime.__test.validateSettings("123456:${"a".repeat(32)}", {
+    const { startLocalLeader } = require(${JSON.stringify(brokerServerPath)});
+    const { validateSettings } = require(${JSON.stringify(settingsPath)});
+    const secret = validateSettings("123456:${"a".repeat(32)}", {
       chatId: 42,
       bridgeSecret: "${"b".repeat(64)}",
       port: 43992,
     });
     for (let index = 0; index < 3; index += 1) {
-      const leader = await runtime.__test.startLocalLeader(secret);
+      const leader = await startLocalLeader(secret);
       if (leader !== undefined) throw new Error("standby unexpectedly acquired the port");
     }
     console.log(JSON.stringify({ unchanged: fs.readFileSync(statePath, "utf8") === sentinel }));

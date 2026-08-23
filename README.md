@@ -181,7 +181,7 @@ Reply delivery uses ACKs. A reply stays in durable state until the target Pi pro
 
 Assistant text is observed through Pi's `message_start`, `message_update`, and `message_end` lifecycle events.
 
-- `sendMessageDraft` updates are throttled to avoid one HTTP request per token.
+- `sendMessageDraft` updates are throttled to avoid one HTTP request per token and back off once when Telegram returns `429 retry_after`.
 - Drafts use the session's private topic.
 - Pi Markdown is converted to Telegram's supported HTML subset on every draft update, so partial Markdown remains balanced and safe.
 - Supported formatting includes headings, bold, italic, strikethrough, spoilers, inline/fenced code, links, blockquotes, and readable list markers.
@@ -207,6 +207,14 @@ npm run check
 ```
 
 GitHub Actions runs the same check on Windows, macOS, and Linux. The Windows job also executes the hidden VBS daemon launcher and verifies that it waits for the child process and preserves its exit code.
+
+The runtime is split by responsibility:
+
+- `runtime.cjs` is the public composition facade.
+- `bridge-client.cjs` and `bridge-protocol.cjs` own Pi-side broker communication.
+- `broker-server.cjs`, `broker-state.cjs`, and `telegram-router.cjs` own the local leader, durable routing state, and Telegram updates.
+- `settings.cjs`, `telegram-api.cjs`, and `control.cjs` provide shared configuration, HTTP, and control-panel logic.
+- `streaming.cjs` and `live-status.cjs` handle assistant drafts and live agent status.
 
 ## License
 

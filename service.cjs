@@ -29,10 +29,6 @@ function launchAgentPath() {
   return path.join(os.homedir(), "Library", "LaunchAgents", `${MAC_LABEL}.plist`);
 }
 
-function windowsTaskCommand(nodePath = process.execPath, daemonPath = DAEMON_PATH) {
-  return `"${nodePath}" "${daemonPath}"`;
-}
-
 function windowsDaemonStopScript(daemonPath = DAEMON_PATH) {
   const target = String(daemonPath).replace(/'/g, "''");
   const marker = WINDOWS_DAEMON_MARKER.replace(/'/g, "''");
@@ -134,7 +130,7 @@ function serviceAction(action) {
     const target = `gui/${process.getuid()}/${MAC_LABEL}`;
     if (action === "install") return installMac();
     if (action === "uninstall") return uninstallMac();
-    if (action === "start") return run("launchctl", ["bootstrap", `gui/${process.getuid()}`, launchAgentPath()]);
+    if (action === "start") return run("launchctl", ["kickstart", "-k", target]);
     if (action === "stop") return run("launchctl", ["bootout", `gui/${process.getuid()}`, launchAgentPath()]);
     if (action === "status") return run("launchctl", ["print", target]);
   } else {
@@ -163,4 +159,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = Object.freeze({ WINDOWS_DAEMON_MARKER, launchAgent, serviceAction, systemdUnit, windowsDaemonStopScript, windowsTaskCommand, windowsTaskStopWaitScript, windowsTaskXml });
+module.exports = Object.freeze({ WINDOWS_DAEMON_MARKER, launchAgent, systemdUnit, windowsDaemonStopScript, windowsTaskStopWaitScript, windowsTaskXml });

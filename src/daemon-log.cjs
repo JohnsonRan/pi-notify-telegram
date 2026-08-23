@@ -73,8 +73,4 @@ function installDaemonLogging(options = {}) {
   return logPath;
 }
 
-module.exports = Object.freeze({
-  DEFAULT_MAX_BYTES,
-  daemonLogPath,
-  installDaemonLogging,
-});
+module.exports = Object.freeze({ daemonLogPath, installDaemonLogging });

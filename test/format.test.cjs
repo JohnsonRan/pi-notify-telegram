@@ -3,6 +3,7 @@ const test = require("node:test");
 
 const {
   renderedTextLength,
+  renderTelegramChunkPairs,
   renderTelegramChunks,
   renderTelegramHtml,
   safeUrl,
@@ -38,6 +39,12 @@ test("closes incomplete streaming code fences and leaves incomplete emphasis lit
   const html = renderTelegramHtml("Before **unfinished\n```ts\nconst x = 1 < 2");
   assert.match(html, /Before \*\*unfinished/);
   assert.match(html, /<pre><code class="language-ts">const x = 1 &lt; 2<\/code><\/pre>/);
+});
+
+test("keeps rendered chunks paired with their plain-text fallback", () => {
+  const chunks = renderTelegramChunkPairs(`${"a".repeat(3600)}\n\n${"b".repeat(3600)}`);
+  assert.ok(chunks.length >= 2);
+  assert.ok(chunks.every((chunk) => chunk.html === renderTelegramHtml(chunk.source)));
 });
 
 test("rejects unsafe links and chunks by rendered Telegram length", () => {

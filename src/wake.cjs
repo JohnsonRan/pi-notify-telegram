@@ -281,12 +281,4 @@ class WakeLauncher {
   }
 }
 
-module.exports = Object.freeze({
-  WakeLauncher,
-  appendBoundedText,
-  isPathInside,
-  killWindowsProcessTree,
-  parseControlCommand,
-  prepareTerminalSpecDir,
-  resolveWakeCwd,
-});
+module.exports = Object.freeze({ WakeLauncher, appendBoundedText, parseControlCommand, resolveWakeCwd });

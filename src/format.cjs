@@ -165,14 +165,21 @@ function splitMarkdown(value, renderedLimit = MAX_SOURCE_CHARS) {
   ];
 }
 
+function renderTelegramChunkPairs(markdown, renderedLimit = MAX_SOURCE_CHARS) {
+  return splitMarkdown(markdown, renderedLimit)
+    .map((source) => ({ source, html: renderTelegramHtml(source) }))
+    .filter((chunk) => chunk.html);
+}
+
 function renderTelegramChunks(markdown, renderedLimit = MAX_SOURCE_CHARS) {
-  return splitMarkdown(markdown, renderedLimit).map(renderTelegramHtml).filter(Boolean);
+  return renderTelegramChunkPairs(markdown, renderedLimit).map((chunk) => chunk.html);
 }
 
 module.exports = Object.freeze({
   escapeHtml,
   renderInline,
   renderedTextLength,
+  renderTelegramChunkPairs,
   renderTelegramChunks,
   renderTelegramHtml,
   safeUrl,

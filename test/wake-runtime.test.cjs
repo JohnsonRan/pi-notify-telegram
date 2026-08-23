@@ -3,7 +3,8 @@ const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 const test = require("node:test");
 
-const runtimePath = path.resolve(__dirname, "../src/runtime.cjs");
+const brokerServerPath = path.resolve(__dirname, "../src/broker-server.cjs");
+const settingsPath = path.resolve(__dirname, "../src/settings.cjs");
 const { WAKE_SENTINEL } = require("../src/wake-payload.cjs");
 
 test("creates a session from All Topics and wakes the same topic again", () => {
@@ -55,8 +56,9 @@ global.fetch = async (url, options) => {
 function response(result) { return { ok: true, status: 200, json: async () => ({ ok: true, result }) }; }
 
 (async () => {
-  const runtime = require(${JSON.stringify(runtimePath)});
-  const secret = runtime.__test.validateSettings("123456:${"a".repeat(32)}", {
+  const { closeLeader, startLocalLeader } = require(${JSON.stringify(brokerServerPath)});
+  const { validateSettings } = require(${JSON.stringify(settingsPath)});
+  const secret = validateSettings("123456:${"a".repeat(32)}", {
     chatId: 42,
     allowedUserId: 42,
     bridgeSecret: "${"b".repeat(64)}",
@@ -68,14 +70,14 @@ function response(result) { return { ok: true, status: 200, json: async () => ({
     wakePiCommandArgs: [fakePi],
     wakeOpenTerminal: false,
   });
-  const state = await runtime.__test.startLocalLeader(secret);
+  const state = await startLocalLeader(secret);
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     const lines = fs.existsSync(launchLog) ? fs.readFileSync(launchLog, "utf8").trim().split("\n").filter(Boolean) : [];
     if (lines.length >= 2) break;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  state.server.close();
+  await closeLeader(state);
   const launches = fs.readFileSync(launchLog, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
   const stored = JSON.parse(fs.readFileSync(path.join(dir, "pi-notify-telegram.state.json"), "utf8"));
   console.log(JSON.stringify({ launches, topics: stored.topics, sent }));

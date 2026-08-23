@@ -5,14 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { WINDOWS_DAEMON_MARKER, launchAgent, systemdUnit, windowsDaemonStopScript, windowsTaskCommand, windowsTaskStopWaitScript, windowsTaskXml } = require("../service.cjs");
-
-test("builds a quoted Windows Scheduled Task command", () => {
-  assert.equal(
-    windowsTaskCommand("C:\\Program Files\\node.exe", "C:\\Pi Agent\\daemon.cjs"),
-    '"C:\\Program Files\\node.exe" "C:\\Pi Agent\\daemon.cjs"',
-  );
-});
+const { WINDOWS_DAEMON_MARKER, launchAgent, systemdUnit, windowsDaemonStopScript, windowsTaskStopWaitScript, windowsTaskXml } = require("../service.cjs");
 
 test("stops only the exact Windows daemon process without killing its Pi children", () => {
   const script = windowsDaemonStopScript("C:\\Pi Agent\\daemon's.cjs");

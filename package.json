@@ -16,7 +16,8 @@
   "scripts": {
     "test": "node --test test/*.test.cjs",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test"
+    "syntax": "node scripts/check-syntax.cjs",
+    "check": "npm run typecheck && npm run syntax && npm test"
   },
   "pi": {
     "extensions": [

@@ -5,9 +5,28 @@ const test = require("node:test");
 
 const runtimePath = path.resolve(__dirname, "../src/runtime.cjs");
 const runtime = require(runtimePath);
+const control = require("../src/control.cjs");
+const { closeLeader, startLocalLeader, __test: brokerServerTest } = require("../src/broker-server.cjs");
+const { pruneExpiredBrokerState } = require("../src/broker-state.cjs");
+const liveStatus = require("../src/live-status.cjs");
+const { splitMarkdown } = require("../src/format.cjs");
+const { validateSettings } = require("../src/settings.cjs");
+const telegramApi = require("../src/telegram-api.cjs");
+const { formatLocalTimestamp } = require("../src/time.cjs");
+const helpers = {
+  ...control,
+  ...brokerServerTest,
+  ...liveStatus,
+  ...telegramApi,
+  closeLeader,
+  formatLocalTimestamp,
+  pruneExpiredBrokerState,
+  startLocalLeader,
+  validateSettings,
+};
 
 test("validates split secret/config settings", () => {
-  const settings = runtime.__test.validateSettings(`123456:${"a".repeat(32)}`, {
+  const settings = helpers.validateSettings(`123456:${"a".repeat(32)}`, {
     chatId: 42,
     allowedUserId: 42,
     bridgeSecret: "b".repeat(64),
@@ -16,18 +35,18 @@ test("validates split secret/config settings", () => {
   assert.equal(settings.chatId, 42);
   assert.equal(settings.port, 43871);
   assert.equal(settings.linkPreview, false);
-  const enabled = runtime.__test.validateSettings(`123456:${"a".repeat(32)}`, {
+  const enabled = helpers.validateSettings(`123456:${"a".repeat(32)}`, {
     chatId: 42,
     bridgeSecret: "b".repeat(64),
     linkPreview: true,
   });
   assert.equal(enabled.linkPreview, true);
-  assert.throws(() => runtime.__test.validateSettings(`123456:${"a".repeat(32)}`, {
+  assert.throws(() => helpers.validateSettings(`123456:${"a".repeat(32)}`, {
     chatId: 42,
     bridgeSecret: "b".repeat(64),
     wakeMode: true,
   }), /wakeAllowedRoots/);
-  const wake = runtime.__test.validateSettings(`123456:${"a".repeat(32)}`, {
+  const wake = helpers.validateSettings(`123456:${"a".repeat(32)}`, {
     chatId: 42,
     bridgeSecret: "b".repeat(64),
     wakeMode: true,
@@ -37,7 +56,7 @@ test("validates split secret/config settings", () => {
   assert.equal(wake.wakeMode, true);
   assert.equal(wake.wakeOpenTerminal, true);
   assert.deepEqual(wake.wakeAllowedRoots, ["F:\\"]);
-  const background = runtime.__test.validateSettings(`123456:${"a".repeat(32)}`, {
+  const background = helpers.validateSettings(`123456:${"a".repeat(32)}`, {
     chatId: 42,
     bridgeSecret: "b".repeat(64),
     wakeMode: true,
@@ -46,7 +65,7 @@ test("validates split secret/config settings", () => {
     wakeOpenTerminal: false,
   });
   assert.equal(background.wakeOpenTerminal, false);
-  assert.throws(() => runtime.__test.validateSettings(`123456:${"a".repeat(32)}`, {
+  assert.throws(() => helpers.validateSettings(`123456:${"a".repeat(32)}`, {
     chatId: 42,
     bridgeSecret: "b".repeat(64),
     wakeMode: true,
@@ -63,17 +82,17 @@ test("waits for foreground wake registration, stability, and stop state", async 
     wakeLauncher: { isRunning: () => running },
   };
   setTimeout(() => state.clientsBySession.set("session", client), 10);
-  assert.equal(await runtime.__test.waitForWakeRegistration(state, "session", 200), client);
-  assert.equal(await runtime.__test.waitForWakeRegistration(state, "missing", 10), undefined);
-  assert.equal(await runtime.__test.waitForWakeStability(state, "session", 10), true);
+  assert.equal(await helpers.waitForWakeRegistration(state, "session", 200), client);
+  assert.equal(await helpers.waitForWakeRegistration(state, "missing", 10), undefined);
+  assert.equal(await helpers.waitForWakeStability(state, "session", 10), true);
   running = false;
-  assert.equal(await runtime.__test.waitForWakeStability(state, "session", 10), false);
-  assert.equal(await runtime.__test.waitForWakeStop(state, "session", 10), true);
+  assert.equal(await helpers.waitForWakeStability(state, "session", 10), false);
+  assert.equal(await helpers.waitForWakeStop(state, "session", 10), true);
 });
 
 test("formats broker diagnostics for Telegram status using host-local time", () => {
   const startedAt = Date.parse("2026-01-02T03:04:05.000Z");
-  const text = runtime.__test.formatBrokerStatus({
+  const text = helpers.formatBrokerStatus({
     pid: 4321,
     packageVersion: "1.2.3",
     startedAt,
@@ -84,8 +103,8 @@ test("formats broker diagnostics for Telegram status using host-local time", () 
   }, Date.parse("2026-01-03T05:07:08.000Z"));
   assert.match(text, /Broker PID: 4321/);
   assert.match(text, /Version: 1\.2\.3/);
-  assert.ok(text.includes(`Started: ${runtime.__test.formatLocalTimestamp(startedAt)}`));
-  assert.match(runtime.__test.formatLocalTimestamp(new Date(2026, 0, 2, 3, 4, 5)), /^2026-01-02 03:04:05 [+-]\d{2}:\d{2}$/);
+  assert.ok(text.includes(`Started: ${helpers.formatLocalTimestamp(startedAt)}`));
+  assert.match(helpers.formatLocalTimestamp(new Date(2026, 0, 2, 3, 4, 5)), /^2026-01-02 03:04:05 [+-]\d{2}:\d{2}$/);
   assert.match(text, /Uptime: 1d 2h 3m 3s/);
   assert.match(text, /Connected Pi sessions: 1/);
   assert.match(text, /Wake Pi sessions: 2/);
@@ -102,16 +121,16 @@ test("builds Telegram control panels with inline buttons", () => {
     wakeLauncher: { runningSessionIds: () => [] },
     topics: new Map([["session-id", { sessionId: "session-id", name: "Demo", cwd: "C:\\Demo", createdAt: 1 }]]),
   };
-  const status = runtime.__test.controlPanel(state, "status", 2_000);
+  const status = helpers.controlPanel(state, "status", 2_000);
   assert.match(status.text, /Broker PID: 123/);
   assert.deepEqual(status.replyMarkup.inline_keyboard[0].map((item) => item.callback_data), ["control:status", "control:sessions"]);
-  const sessions = runtime.__test.controlPanel(state, "sessions");
+  const sessions = helpers.controlPanel(state, "sessions");
   assert.match(sessions.text, /Demo · session-/);
   assert.equal(sessions.replyMarkup.inline_keyboard[0][0].callback_data, "restore:session-id");
-  assert.equal(runtime.__test.parseControlCallback("control:help"), "help");
-  assert.equal(runtime.__test.parseControlCallback("control:unknown"), undefined);
-  assert.equal(runtime.__test.parseRestoreCallback("restore:12345678-1234-1234-1234-123456789abc"), "12345678-1234-1234-1234-123456789abc");
-  assert.equal(runtime.__test.parseRestoreCallback("restore:session-id"), undefined);
+  assert.equal(helpers.parseControlCallback("control:help"), "help");
+  assert.equal(helpers.parseControlCallback("control:unknown"), undefined);
+  assert.equal(helpers.parseRestoreCallback("restore:12345678-1234-1234-1234-123456789abc"), "12345678-1234-1234-1234-123456789abc");
+  assert.equal(helpers.parseRestoreCallback("restore:session-id"), undefined);
 });
 
 test("answers and applies authorized Telegram control callbacks", async () => {
@@ -138,19 +157,19 @@ test("answers and applies authorized Telegram control callbacks", async () => {
     }]]),
   };
   try {
-    await runtime.__test.handleCallbackQuery(state, {
+    await helpers.handleCallbackQuery(state, {
       id: "callback-1",
       data: "control:status",
       from: { id: 7 },
       message: { message_id: 99, chat: { id: 42 } },
     });
-    await runtime.__test.handleCallbackQuery(state, {
+    await helpers.handleCallbackQuery(state, {
       id: "callback-2",
       data: "control:status",
       from: { id: 8 },
       message: { message_id: 99, chat: { id: 42 } },
     });
-    await runtime.__test.handleCallbackQuery(state, {
+    await helpers.handleCallbackQuery(state, {
       id: "callback-3",
       data: "restore:12345678-1234-1234-1234-123456789abc",
       from: { id: 7 },
@@ -173,8 +192,8 @@ test("answers and applies authorized Telegram control callbacks", async () => {
   assert.equal(calls[3].body.show_alert, true);
   assert.match(calls[3].body.text, /cannot open topics automatically/);
   assert.deepEqual(restored, ["12345678-1234-1234-1234-123456789abc"]);
-  assert.match(runtime.__test.RESTORE_CONTEXT_PROMPT, /key decisions/);
-  assert.match(runtime.__test.RESTORE_CONTEXT_PROMPT, /Do not modify files or run tools/);
+  assert.match(helpers.RESTORE_CONTEXT_PROMPT, /key decisions/);
+  assert.match(helpers.RESTORE_CONTEXT_PROMPT, /Do not modify files or run tools/);
 });
 
 test("restore wakes the exact session with a context recap", async () => {
@@ -208,11 +227,11 @@ test("restore wakes the exact session with a context recap", async () => {
     },
   };
 
-  await runtime.__test.restoreSessionTopic(state, topic, options);
+  await helpers.restoreSessionTopic(state, topic, options);
   assert.equal(calls[0].options.threadId, 77);
   assert.match(calls[0].text, /cannot switch topics automatically/);
   assert.equal(calls[1].topic, topic);
-  assert.equal(calls[1].prompt, runtime.__test.RESTORE_CONTEXT_PROMPT);
+  assert.equal(calls[1].prompt, helpers.RESTORE_CONTEXT_PROMPT);
   assert.equal(calls[1].replyTo, 88);
 });
 
@@ -229,7 +248,7 @@ test("restore injects the recap into an already connected session", async () => 
     wakeReservations: new Set(),
   };
 
-  await runtime.__test.restoreSessionTopic(state, topic, {
+  await helpers.restoreSessionTopic(state, topic, {
     withTopicRetry: async (_state, _sessionId, _cwd, _name, operation) => operation(topic),
     sendBrokerText: async () => ({ message_id: 88 }),
     connectedTarget: () => ({ registered: true }),
@@ -242,21 +261,21 @@ test("restore injects the recap into an already connected session", async () => 
 
   assert.equal(queued.length, 1);
   assert.deepEqual(queued[0].target, { sessionId: topic.sessionId, threadId: 77 });
-  assert.equal(queued[0].message.text, runtime.__test.RESTORE_CONTEXT_PROMPT);
+  assert.equal(queued[0].message.text, helpers.RESTORE_CONTEXT_PROMPT);
   assert.equal(queued[0].message.message_id, 88);
   assert.equal(queued[0].holdForWake, undefined);
 });
 
 test("formats bounded wake process diagnostics for Telegram", () => {
-  assert.equal(runtime.__test.formatWakeExitDetail("\u001b[31mconfig failed\u001b[0m\n"), "config failed");
-  const detail = runtime.__test.formatWakeExitDetail("x".repeat(2000));
+  assert.equal(helpers.formatWakeExitDetail("\u001b[31mconfig failed\u001b[0m\n"), "config failed");
+  const detail = helpers.formatWakeExitDetail("x".repeat(2000));
   assert.equal(detail.length, 1600);
   assert.ok(detail.startsWith("…"));
 });
 
 test("formats live main-agent and subagent progress", () => {
-  assert.equal(runtime.__test.summarizeToolArgs("read", { path: "src/runtime.cjs" }), "src/runtime.cjs");
-  const text = runtime.__test.formatLiveStatus({
+  assert.equal(helpers.summarizeToolArgs("read", { path: "src/runtime.cjs" }), "src/runtime.cjs");
+  const text = helpers.formatLiveStatus({
     startedAt: 1_000,
     turnIndex: 1,
     toolName: "subagent",
@@ -277,7 +296,7 @@ test("formats live main-agent and subagent progress", () => {
 });
 
 test("maps Pi command names to Telegram-safe aliases and restores them", () => {
-  const commands = runtime.__test.normalizePiCommands([
+  const commands = helpers.normalizePiCommands([
     { name: "review", description: "Review code", source: "extension" },
     { name: "reload-runtime", description: "Reload", source: "extension" },
     { name: "skill:frontend-design", description: "Design", source: "skill" },
@@ -289,21 +308,21 @@ test("maps Pi command names to Telegram-safe aliases and restores them", () => {
   assert.equal(commands[1].telegramName, "reload_runtime");
   assert.notEqual(commands[3].telegramName, "status");
   const skill = commands.find((command) => command.name === "skill:frontend-design");
-  assert.equal(runtime.__test.translateTelegramCommand({ commands }, `/${skill.telegramName} mobile`), "/skill:frontend-design mobile");
+  assert.equal(helpers.translateTelegramCommand({ commands }, `/${skill.telegramName} mobile`), "/skill:frontend-design mobile");
 });
 
 test("builds stable topic names, chunks text, and rejects unthreaded fallback routing", () => {
-  assert.equal(runtime.__test.topicName("1234567890", "C:/work/demo", ""), "demo · 12345678");
-  assert.equal(runtime.__test.topicName("1234567890", "C:/work/demo", "demo · 12345678"), "demo · 12345678");
-  const chunks = runtime.__test.splitTelegramText("x".repeat(9000));
+  assert.equal(helpers.topicName("1234567890", "C:/work/demo", ""), "demo · 12345678");
+  assert.equal(helpers.topicName("1234567890", "C:/work/demo", "demo · 12345678"), "demo · 12345678");
+  const chunks = splitMarkdown("x".repeat(9000));
   assert.ok(chunks.length >= 3);
   assert.ok(chunks.every((chunk) => chunk.length <= 4000));
   const state = {
     topics: new Map(),
     mappings: new Map([[10, { messageId: 10, sessionId: "latest" }]]),
   };
-  assert.equal(runtime.__test.findReplyTarget(state, { text: "unthreaded" }), undefined);
-  assert.equal(runtime.__test.findReplyTarget(state, { reply_to_message: { message_id: 10 } }).sessionId, "latest");
+  assert.equal(helpers.findReplyTarget(state, { text: "unthreaded" }), undefined);
+  assert.equal(helpers.findReplyTarget(state, { reply_to_message: { message_id: 10 } }).sessionId, "latest");
 });
 
 test("prunes stale mappings and undelivered replies but retains topics", () => {
@@ -315,17 +334,17 @@ test("prunes stale mappings and undelivered replies but retains topics", () => {
     pendingReplies: new Map([["old", { createdAt: old }], ["fresh", { createdAt: fresh }]]),
     topics: new Map([["session", { createdAt: old }]]),
   };
-  assert.equal(runtime.__test.pruneExpiredBrokerState(state, now), true);
+  assert.equal(helpers.pruneExpiredBrokerState(state, now), true);
   assert.deepEqual([...state.mappings.keys()], [2]);
   assert.deepEqual([...state.pendingReplies.keys()], ["fresh"]);
   assert.deepEqual([...state.topics.keys()], ["session"]);
-  assert.equal(runtime.__test.pruneExpiredBrokerState(state, now), false);
+  assert.equal(helpers.pruneExpiredBrokerState(state, now), false);
 });
 
 test("commits a Telegram update offset only after successful handling", async () => {
   const state = { offset: 10 };
   let persists = 0;
-  await assert.rejects(runtime.__test.processTelegramUpdate(state, {
+  await assert.rejects(helpers.processTelegramUpdate(state, {
     update_id: 10,
     message: { text: "retry me" },
   }, {
@@ -335,7 +354,7 @@ test("commits a Telegram update offset only after successful handling", async ()
   assert.equal(state.offset, 10);
   assert.equal(persists, 0);
 
-  await runtime.__test.processTelegramUpdate(state, {
+  await helpers.processTelegramUpdate(state, {
     update_id: 10,
     message: { text: "retry me" },
   }, {
@@ -364,7 +383,7 @@ test("closes broker clients before stopping the leader", async () => {
       closeAllConnections() { closeAllCalled = true; },
     },
   };
-  await runtime.__test.closeLeader(state);
+  await helpers.closeLeader(state);
   assert.equal(state.closed, true);
   assert.equal(state.pollAborted, true);
   assert.equal(socketDestroyed, true);
@@ -376,7 +395,7 @@ test("closes broker clients before stopping the leader", async () => {
 
 test("stream queue cleanup does not create an unhandled rejection", async () => {
   const state = { streamQueues: new Map() };
-  const failure = runtime.__test.enqueueStream(state, "session", async () => {
+  const failure = helpers.enqueueStream(state, "session", async () => {
     throw new Error("rate limited");
   });
   await assert.rejects(failure, /rate limited/);
@@ -399,7 +418,7 @@ test("retries a Telegram rate limit once using retry_after", async () => {
     return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 1 } }) };
   };
   try {
-    const result = await runtime.__test.telegramCall(
+    const result = await helpers.telegramCall(
       { botToken: `123456:${"a".repeat(32)}` },
       "sendMessageDraft",
       { text: "status" },
@@ -423,7 +442,7 @@ test("falls back to plain text only after a deterministic Telegram Bad Request",
     return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 1 } }) };
   };
   try {
-    await runtime.__test.telegramFormattedCall(
+    await helpers.telegramFormattedCall(
       { botToken: `123456:${"a".repeat(32)}` },
       "sendMessage",
       { text: "<b>broken", parse_mode: "HTML" },
@@ -570,7 +589,7 @@ async function emit(pi, event, payload, ctx) {
     runtime.notify(pi1, ctx1, { sessionId: "session-one", cwd: ctx1.cwd }, "Question <one>", "Reply **one**"),
     runtime.notify(pi2, ctx2, { sessionId: "session-two", cwd: ctx2.cwd }, "Question two", "Reply two"),
   ]);
-  await new Promise((resolve) => setTimeout(resolve, 400));
+  await new Promise((resolve) => setTimeout(resolve, 600));
 
   const state = JSON.parse(fs.readFileSync(path.join(dir, "pi-notify-telegram.state.json"), "utf8"));
   const result = {

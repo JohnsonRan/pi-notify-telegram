@@ -101,10 +101,4 @@ function createTerminalLaunch(specPath, options = {}) {
   return { reason: `foreground terminals are not supported on ${platform}` };
 }
 
-module.exports = Object.freeze({
-  appleScriptString,
-  createTerminalLaunch,
-  findExecutable,
-  encodePowerShell,
-  shellQuote,
-});
+module.exports = Object.freeze({ createTerminalLaunch, shellQuote });

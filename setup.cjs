@@ -6,6 +6,7 @@ const net = require("node:net");
 const readline = require("node:readline/promises");
 const { stdin, stdout } = require("node:process");
 const { CONFIG_PATH, DEFAULT_PORT, SECRET_PATH, STATE_PATH } = require("./src/paths.cjs");
+const { preserveOperationalConfig } = require("./src/settings.cjs");
 
 async function brokerIsRunning() {
   let port;
@@ -69,24 +70,6 @@ function hiddenQuestion(prompt) {
     stdin.resume();
     stdin.on("data", onData);
   });
-}
-
-function preserveOperationalConfig(config, previousConfig) {
-  const validators = {
-    port: (value) => Number.isInteger(value) && value >= 1024 && value <= 65535,
-    linkPreview: (value) => typeof value === "boolean",
-    wakeMode: (value) => typeof value === "boolean",
-    wakeDefaultCwd: (value) => typeof value === "string",
-    wakeAllowedRoots: (value) => Array.isArray(value) && value.every((root) => typeof root === "string"),
-    wakePiCommand: (value) => typeof value === "string" && value.length > 0,
-    wakePiCommandArgs: (value) => Array.isArray(value) && value.every((argument) => typeof argument === "string"),
-    wakeOpenTerminal: (value) => typeof value === "boolean",
-  };
-
-  for (const [key, isValid] of Object.entries(validators)) {
-    if (isValid(previousConfig[key])) config[key] = previousConfig[key];
-  }
-  return config;
 }
 
 async function readOptionalJson(file, read = readFile) {
