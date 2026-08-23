@@ -20,7 +20,7 @@ test("validates split secret/config settings", () => {
 test("builds stable topic names, chunks text, and rejects unthreaded fallback routing", () => {
   assert.equal(runtime.__test.topicName("1234567890", "C:/work/demo", ""), "demo · 12345678");
   const chunks = runtime.__test.splitTelegramText("x".repeat(9000));
-  assert.equal(chunks.length, 3);
+  assert.ok(chunks.length >= 3);
   assert.ok(chunks.every((chunk) => chunk.length <= 4000));
   const state = {
     topics: new Map(),
@@ -28,6 +28,33 @@ test("builds stable topic names, chunks text, and rejects unthreaded fallback ro
   };
   assert.equal(runtime.__test.findReplyTarget(state, { text: "unthreaded" }), undefined);
   assert.equal(runtime.__test.findReplyTarget(state, { reply_to_message: { message_id: 10 } }).sessionId, "latest");
+});
+
+test("falls back to plain text only after a deterministic Telegram Bad Request", async () => {
+  const originalFetch = global.fetch;
+  const payloads = [];
+  global.fetch = async (_url, options) => {
+    const payload = JSON.parse(options.body);
+    payloads.push(payload);
+    if (payloads.length === 1) {
+      return { ok: false, status: 400, json: async () => ({ ok: false, description: "Bad Request: can't parse entities" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 1 } }) };
+  };
+  try {
+    await runtime.__test.telegramFormattedCall(
+      { botToken: `123456:${"a".repeat(32)}` },
+      "sendMessage",
+      { text: "<b>broken", parse_mode: "HTML" },
+      "plain fallback",
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
+  assert.equal(payloads.length, 2);
+  assert.equal(payloads[0].parse_mode, "HTML");
+  assert.equal(payloads[1].parse_mode, undefined);
+  assert.equal(payloads[1].text, "plain fallback");
 });
 
 test("routes two Pi sessions through separate private topics and streams output", () => {
@@ -45,6 +72,7 @@ let nextThread = 700;
 let nextMessage = 100;
 let updatesSent = false;
 const notificationByThread = new Map();
+const notificationMessages = [];
 const drafts = [];
 const finalMessages = [];
 
@@ -61,8 +89,10 @@ global.fetch = async (url, options) => {
   }
   if (method === "sendMessage") {
     const sent = { message_id: ++nextMessage, chat: { id: 42 }, message_thread_id: body.message_thread_id };
-    if (body.reply_markup) notificationByThread.set(body.message_thread_id, sent.message_id);
-    else finalMessages.push(body);
+    if (body.reply_markup) {
+      notificationByThread.set(body.message_thread_id, sent.message_id);
+      notificationMessages.push(body);
+    } else finalMessages.push(body);
     return response(sent);
   }
   if (method === "getUpdates") {
@@ -130,7 +160,7 @@ async function emit(pi, event, payload, ctx) {
   await emit(pi1, "message_end", { message: partial }, ctx1);
 
   await Promise.all([
-    runtime.notify(pi1, ctx1, { sessionId: "session-one", cwd: ctx1.cwd }, "Question one", "Reply one"),
+    runtime.notify(pi1, ctx1, { sessionId: "session-one", cwd: ctx1.cwd }, "Question <one>", "Reply **one**"),
     runtime.notify(pi2, ctx2, { sessionId: "session-two", cwd: ctx2.cwd }, "Question two", "Reply two"),
   ]);
   await new Promise((resolve) => setTimeout(resolve, 400));
@@ -143,6 +173,7 @@ async function emit(pi, event, payload, ctx) {
     topicThreads: state.topics.map((topic) => topic.threadId).sort((a, b) => a - b),
     mappings: state.mappings.length,
     pendingReplies: state.pendingReplies.length,
+    notificationMessages,
     drafts,
     finalMessages,
   };
@@ -166,6 +197,7 @@ async function emit(pi, event, payload, ctx) {
   assert.deepEqual(result.topicThreads, [701, 702]);
   assert.equal(result.mappings, 0);
   assert.equal(result.pendingReplies, 0);
-  assert.ok(result.drafts.some((draft) => draft.message_thread_id === 701));
-  assert.ok(result.finalMessages.some((message) => message.message_thread_id === 701 && message.text === "Streaming hello"));
+  assert.ok(result.notificationMessages.some((message) => message.parse_mode === "HTML" && message.text.includes("<b>Question &lt;one&gt;</b>") && message.text.includes("Reply <b>one</b>")));
+  assert.ok(result.drafts.some((draft) => draft.parse_mode === "HTML" && draft.text === "Streaming hello"));
+  assert.ok(result.finalMessages.some((message) => message.parse_mode === "HTML" && message.text === "Streaming hello"));
 });

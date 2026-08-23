@@ -9,6 +9,7 @@ Each Pi session gets its own topic in the bot's private chat. Telegram replies a
 - One private Telegram topic per top-level Pi session
 - Subagent processes (`PI_SUBAGENT_CHILD=1`) stay inside their parent session and do not create topics
 - Native streaming assistant responses
+- Safe Markdown-to-Telegram-HTML rendering for headings, emphasis, code, links, quotes, spoilers, and lists
 - Notification replies become `pi.sendUserMessage()` input
 - Multiple concurrent Pi processes share one localhost broker and one `getUpdates` poller
 - Replies route by `message_thread_id`, so agents cannot consume each other's messages
@@ -104,6 +105,10 @@ Assistant text is observed through Pi's `message_start`, `message_update`, and `
 
 - `sendMessageDraft` updates are throttled to avoid one HTTP request per token.
 - Drafts use the session's private topic.
+- Pi Markdown is converted to Telegram's supported HTML subset on every draft update, so partial Markdown remains balanced and safe.
+- Supported formatting includes headings, bold, italic, strikethrough, spoilers, inline/fenced code, links, blockquotes, and readable list markers.
+- Raw HTML and unsafe link protocols are escaped rather than trusted.
+- If Telegram rejects formatted entities, delivery retries once as plain text.
 - The final response is persisted with `sendMessage`.
 - Responses longer than Telegram's message limit are split at line boundaries when possible.
 - Thinking blocks and tool-call payloads are not forwarded; only assistant text content is streamed.

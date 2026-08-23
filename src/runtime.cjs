@@ -11,6 +11,12 @@ const { randomInt, randomUUID } = require("node:crypto");
 const { readFile, writeFile, rename } = require("node:fs/promises");
 const net = require("node:net");
 const path = require("node:path");
+const {
+  escapeHtml,
+  renderTelegramChunks,
+  renderTelegramHtml,
+  splitMarkdown,
+} = require("./format.cjs");
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(process.env.USERPROFILE || process.env.HOME, ".pi", "agent");
 const SECRET_PATH = path.join(AGENT_DIR, "pi-notify-telegram.secret");
@@ -96,6 +102,17 @@ async function telegramCall(secret, method, payload, timeoutMs = 20_000) {
     throw new Error(`Telegram ${method} failed: ${result?.description || `HTTP ${response.status}`}`);
   }
   return result.result;
+}
+
+async function telegramFormattedCall(secret, method, payload, plainText) {
+  try {
+    return await telegramCall(secret, method, payload);
+  } catch (error) {
+    if (!payload.parse_mode || !/Bad Request|parse entities|unsupported.*tag|can't find end tag/i.test(errorMessage(error))) throw error;
+    const fallback = { ...payload, text: String(plainText ?? "") };
+    delete fallback.parse_mode;
+    return telegramCall(secret, method, fallback);
+  }
 }
 
 function sendLine(socket, value) {
@@ -237,18 +254,7 @@ function findReplyTarget(state, message) {
 }
 
 function splitTelegramText(value) {
-  const text = String(value || "");
-  if (text.length <= 4000) return [text];
-  const chunks = [];
-  let rest = text;
-  while (rest.length > 4000) {
-    let index = rest.lastIndexOf("\n", 4000);
-    if (index < 1000) index = 4000;
-    chunks.push(rest.slice(0, index));
-    rest = rest.slice(index).replace(/^\n/, "");
-  }
-  if (rest) chunks.push(rest);
-  return chunks;
+  return splitMarkdown(value);
 }
 
 function enqueueStream(state, sessionId, task) {
@@ -351,22 +357,41 @@ async function pollTelegram(state) {
 
 async function sendNotification(state, client, message) {
   const title = String(message.title || "Pi").slice(0, 256);
-  const body = String(message.body || "").slice(0, 3500);
+  const body = String(message.body || "");
   const sessionId = String(message.sessionId || client.sessionId);
+  const bodySources = splitMarkdown(body, 3200);
+  const bodyHtml = bodySources.map(renderTelegramHtml);
   const sent = await withTopicRetry(
     state,
     sessionId,
     message.cwd || client.cwd,
     message.sessionName || client.sessionName,
-    (topic) => telegramCall(state.secret, "sendMessage", {
-      chat_id: state.secret.chatId,
-      message_thread_id: topic.threadId,
-      text: `${title}\n\n${body}`,
-      reply_markup: {
-        force_reply: true,
-        input_field_placeholder: "Reply to Pi...",
-      },
-    }).then((result) => ({ result, topic })),
+    async (topic) => {
+      let result;
+      for (let index = 0; index < bodyHtml.length; index += 1) {
+        const first = index === 0;
+        const last = index === bodyHtml.length - 1;
+        const html = first
+          ? `<b>${escapeHtml(title)}</b>${bodyHtml[index] ? `\n\n${bodyHtml[index]}` : ""}`
+          : bodyHtml[index];
+        const plain = first
+          ? `${title}${bodySources[index] ? `\n\n${bodySources[index]}` : ""}`
+          : bodySources[index];
+        result = await telegramFormattedCall(state.secret, "sendMessage", {
+          chat_id: state.secret.chatId,
+          message_thread_id: topic.threadId,
+          text: html,
+          parse_mode: "HTML",
+          ...(last ? {
+            reply_markup: {
+              force_reply: true,
+              input_field_placeholder: "Reply to Pi...",
+            },
+          } : {}),
+        }, plain);
+      }
+      return { result, topic };
+    },
   );
   const topic = sent.topic;
   const sentMessage = sent.result;
@@ -395,22 +420,29 @@ function handleStreamRequest(state, client, message) {
     client.sessionName,
     async (topic) => {
       if (message.type === "streamDraft") {
-        const preview = text.length <= 4096 ? text : `…${text.slice(-4095)}`;
-        await telegramCall(state.secret, "sendMessageDraft", {
+        const sourceChunks = splitTelegramText(text);
+        const tail = sourceChunks[sourceChunks.length - 1] || "";
+        const preview = sourceChunks.length > 1 ? `…${tail}` : tail;
+        const html = renderTelegramHtml(preview);
+        await telegramFormattedCall(state.secret, "sendMessageDraft", {
           chat_id: state.secret.chatId,
           message_thread_id: topic.threadId,
           draft_id: message.draftId,
-          text: preview,
-        });
+          text: html,
+          ...(html ? { parse_mode: "HTML" } : {}),
+        }, preview);
         return;
       }
       if (message.type === "streamFinal" && text.trim()) {
-        for (const chunk of splitTelegramText(text)) {
-          await telegramCall(state.secret, "sendMessage", {
+        const sourceChunks = splitTelegramText(text);
+        const htmlChunks = renderTelegramChunks(text);
+        for (let index = 0; index < htmlChunks.length; index += 1) {
+          await telegramFormattedCall(state.secret, "sendMessage", {
             chat_id: state.secret.chatId,
             message_thread_id: topic.threadId,
-            text: chunk,
-          });
+            text: htmlChunks[index],
+            parse_mode: "HTML",
+          }, sourceChunks[index] || "");
         }
       }
     },
@@ -920,9 +952,8 @@ function attach(pi) {
       timer: undefined,
     };
     state.currentStream = stream;
-    sendStream(state, "streamDraft", stream).then(() => {
-      stream.lastSent = stream.text;
-    }).catch((error) => {
+    stream.lastSent = stream.text;
+    sendStream(state, "streamDraft", stream).catch((error) => {
       console.warn(`[pi-notify-telegram] Cannot start stream: ${errorMessage(error)}`);
     });
   });
@@ -962,5 +993,5 @@ async function notify(pi, ctx, notification, title, body) {
 module.exports = Object.freeze({
   attach,
   notify,
-  __test: Object.freeze({ assistantText, findReplyTarget, splitTelegramText, topicName, validateSettings }),
+  __test: Object.freeze({ assistantText, findReplyTarget, splitTelegramText, telegramFormattedCall, topicName, validateSettings }),
 });
