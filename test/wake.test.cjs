@@ -50,6 +50,11 @@ test("launches one full-permission Pi process per session", async () => {
   let child;
   const launcher = new WakeLauncher({
     piCommand: "pi-test",
+    processEnvironment: {
+      PATH: "test-path",
+      PI_EXTENSION_UTILS_PROCESS_DOMAIN: "parent-domain",
+      PI_CONTINUE_WATCHDOG_ROOT_PID: "123",
+    },
     spawn(command, args, options) {
       child = new EventEmitter();
       child.pid = 123;
@@ -70,6 +75,9 @@ test("launches one full-permission Pi process per session", async () => {
     JSON.parse(Buffer.from(calls[0].options.env.PI_TELEGRAM_WAKE_PAYLOAD, "base64url").toString("utf8")),
     { text: "hello", expandPromptTemplates: true },
   );
+  assert.equal(calls[0].options.env.PATH, "test-path");
+  assert.equal(calls[0].options.env.PI_EXTENSION_UTILS_PROCESS_DOMAIN, undefined);
+  assert.equal(calls[0].options.env.PI_CONTINUE_WATCHDOG_ROOT_PID, undefined);
   assert.equal(calls[0].options.windowsHide, true);
   assert.deepEqual(calls[0].options.stdio, ["ignore", "ignore", "pipe"]);
   child.emit("close", 0, null);

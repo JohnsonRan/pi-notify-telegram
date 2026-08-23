@@ -10,6 +10,16 @@ const { wakePromptArgument } = require("./wake-payload.cjs");
 const MAX_STDERR_BYTES = 8 * 1024;
 const TERMINAL_HOST_PATH = path.join(__dirname, "terminal-host.cjs");
 const TERMINAL_SPEC_MAX_AGE_MS = 60 * 60 * 1000;
+const INDEPENDENT_SESSION_ENV_KEYS = [
+  "PI_EXTENSION_UTILS_PROCESS_DOMAIN",
+  "PI_CONTINUE_WATCHDOG_ROOT_PID",
+];
+
+function independentSessionEnvironment(environment) {
+  const result = { ...environment };
+  for (const key of INDEPENDENT_SESSION_ENV_KEYS) delete result[key];
+  return result;
+}
 
 async function prepareTerminalSpecDir(directory) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -88,7 +98,8 @@ class WakeLauncher {
     this.terminalSpecDir = String(options.terminalSpecDir || path.join(os.tmpdir(), "pi-notify-telegram"));
     this.powershell = options.powershell;
     this.osascript = options.osascript;
-    this.terminalEnvironment = options.terminalEnvironment || process.env;
+    this.processEnvironment = options.processEnvironment || process.env;
+    this.terminalEnvironment = options.terminalEnvironment || this.processEnvironment;
     this.findExecutable = options.findExecutable;
     this.killTree = typeof options.killTree === "function" ? options.killTree : killWindowsProcessTree;
     this.running = new Map();
@@ -141,8 +152,10 @@ class WakeLauncher {
       text: String(prompt || ""),
       expandPromptTemplates: true,
     }), "utf8").toString("base64url");
+    // Telegram wake processes are independent sessions, not subprocess workers
+    // of whichever Pi instance currently owns the broker.
     const wakeEnv = {
-      ...process.env,
+      ...independentSessionEnvironment(this.processEnvironment),
       PI_TELEGRAM_WAKE_CHILD: "1",
       PI_TELEGRAM_WAKE_PAYLOAD: wakePayload,
     };
