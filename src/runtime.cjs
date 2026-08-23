@@ -131,7 +131,9 @@ async function readBrokerState() {
     const raw = JSON.parse(await readFile(STATE_PATH, "utf8"));
     const offset = Number.isSafeInteger(raw?.offset) && raw.offset >= 0 ? raw.offset : 0;
     const mappings = Array.isArray(raw?.mappings)
-      ? raw.mappings.filter((item) => item && Number.isSafeInteger(item.messageId) && typeof item.sessionId === "string").slice(-MAX_MAPPINGS)
+      ? raw.mappings
+          .filter((item) => item && Number.isSafeInteger(item.messageId) && Number.isSafeInteger(item.threadId) && typeof item.sessionId === "string")
+          .slice(-MAX_MAPPINGS)
       : [];
     const pendingReplies = Array.isArray(raw?.pendingReplies)
       ? raw.pendingReplies.filter((item) => item && typeof item.deliveryId === "string" && typeof item.sessionId === "string" && typeof item.text === "string").slice(-MAX_PENDING_REPLIES)
@@ -524,6 +526,7 @@ async function startLocalLeader(secret) {
     persistQueue: Promise.resolve(),
     closed: false,
   };
+  queuePersist(state).catch((error) => console.warn(`[pi-notify-telegram] Cannot normalize state: ${errorMessage(error)}`));
   const server = net.createServer((socket) => {
     socket.setNoDelay(true);
     const client = { socket, registered: false };

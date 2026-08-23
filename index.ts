@@ -65,6 +65,10 @@ function isSemanticHook(value: unknown): value is SemanticHook {
 }
 
 export default function piNotifyTelegram(pi: ExtensionAPI): void {
+  // Subagents report back through their parent; giving each child a Telegram
+  // topic would duplicate output and expose internal worker conversations.
+  if (process.env.PI_SUBAGENT_CHILD === "1") return;
+
   runtime.attach(pi);
 
   let liveContext: ExtensionContext | undefined;
