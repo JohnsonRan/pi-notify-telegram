@@ -71,11 +71,12 @@ test("waits for foreground wake registration, stability, and stop state", async 
   assert.equal(await runtime.__test.waitForWakeStop(state, "session", 10), true);
 });
 
-test("formats broker diagnostics for Telegram status", () => {
+test("formats broker diagnostics for Telegram status using host-local time", () => {
+  const startedAt = Date.parse("2026-01-02T03:04:05.000Z");
   const text = runtime.__test.formatBrokerStatus({
     pid: 4321,
     packageVersion: "1.2.3",
-    startedAt: Date.parse("2026-01-02T03:04:05.000Z"),
+    startedAt,
     clientsBySession: new Map([["one", {}]]),
     secret: { wakeOpenTerminal: true },
     wakeLauncher: { runningSessionIds: () => ["one", "two"] },
@@ -83,7 +84,8 @@ test("formats broker diagnostics for Telegram status", () => {
   }, Date.parse("2026-01-03T05:07:08.000Z"));
   assert.match(text, /Broker PID: 4321/);
   assert.match(text, /Version: 1\.2\.3/);
-  assert.match(text, /Started: 2026-01-02T03:04:05\.000Z/);
+  assert.ok(text.includes(`Started: ${runtime.__test.formatLocalTimestamp(startedAt)}`));
+  assert.match(runtime.__test.formatLocalTimestamp(new Date(2026, 0, 2, 3, 4, 5)), /^2026-01-02 03:04:05 [+-]\d{2}:\d{2}$/);
   assert.match(text, /Uptime: 1d 2h 3m 3s/);
   assert.match(text, /Connected Pi sessions: 1/);
   assert.match(text, /Wake Pi sessions: 2/);

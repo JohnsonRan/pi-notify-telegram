@@ -66,6 +66,16 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function formatLocalTimestamp(value) {
+  const date = new Date(value);
+  const pad = (part) => String(part).padStart(2, "0");
+  const offsetMinutes = -date.getTimezoneOffset();
+  const offsetSign = offsetMinutes >= 0 ? "+" : "-";
+  const offsetHours = Math.floor(Math.abs(offsetMinutes) / 60);
+  const offsetRemainder = Math.abs(offsetMinutes) % 60;
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())} ${offsetSign}${pad(offsetHours)}:${pad(offsetRemainder)}`;
+}
+
 function formatDuration(milliseconds) {
   let seconds = Math.max(0, Math.floor(Number(milliseconds) / 1000));
   const days = Math.floor(seconds / 86_400);
@@ -88,7 +98,7 @@ function formatBrokerStatus(state, now = Date.now()) {
     "Pi Telegram wake broker is running.",
     `Broker PID: ${state.pid || process.pid}`,
     `Version: ${state.packageVersion || PACKAGE_VERSION}`,
-    `Started: ${new Date(startedAt).toISOString()}`,
+    `Started: ${formatLocalTimestamp(startedAt)}`,
     `Uptime: ${formatDuration(now - startedAt)}`,
     `Connected Pi sessions: ${state.clientsBySession.size}`,
     `Preferred wake mode: ${state.secret.wakeOpenTerminal ? "foreground terminal (auto fallback)" : "background"}`,
@@ -1805,5 +1815,5 @@ module.exports = Object.freeze({
   attach,
   notify,
   runWakeDaemon,
-  __test: Object.freeze({ RESTORE_CONTEXT_PROMPT, assistantText, controlKeyboard, controlPanel, findReplyTarget, formatBrokerStatus, formatDuration, formatLiveStatus, formatWakeExitDetail, handleCallbackQuery, handleControlMessage, normalizePiCommands, parseControlCallback, parseRestoreCallback, pruneExpiredBrokerState, restoreSessionTopic, splitTelegramText, startLocalLeader, subagentProgress, summarizeToolArgs, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStability, waitForWakeStop }),
+  __test: Object.freeze({ RESTORE_CONTEXT_PROMPT, assistantText, controlKeyboard, controlPanel, findReplyTarget, formatBrokerStatus, formatDuration, formatLiveStatus, formatLocalTimestamp, formatWakeExitDetail, handleCallbackQuery, handleControlMessage, normalizePiCommands, parseControlCallback, parseRestoreCallback, pruneExpiredBrokerState, restoreSessionTopic, splitTelegramText, startLocalLeader, subagentProgress, summarizeToolArgs, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStability, waitForWakeStop }),
 });
