@@ -139,6 +139,7 @@ async function main() {
       allowedUserId: selected.from.id,
       bridgeSecret: randomBytes(32).toString("hex"),
       port: DEFAULT_PORT,
+      linkPreview: false,
     };
     let state = { offset, mappings: [], pendingReplies: [], topics: [] };
     try {

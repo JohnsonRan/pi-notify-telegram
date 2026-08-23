@@ -57,7 +57,8 @@ function validateSettings(botTokenValue, raw) {
   if (!/^[a-f0-9]{32,128}$/i.test(bridgeSecret)) throw new Error("bridgeSecret is invalid");
   const port = raw.port === undefined ? DEFAULT_PORT : asInteger(raw.port, "port");
   if (port < 1024 || port > 65535) throw new Error("port must be between 1024 and 65535");
-  return Object.freeze({ botToken, chatId, allowedUserId, bridgeSecret, port });
+  const linkPreview = raw.linkPreview === true;
+  return Object.freeze({ botToken, chatId, allowedUserId, bridgeSecret, port, linkPreview });
 }
 
 async function readSecret() {
@@ -382,6 +383,7 @@ async function sendNotification(state, client, message) {
           message_thread_id: topic.threadId,
           text: html,
           parse_mode: "HTML",
+          link_preview_options: { is_disabled: !state.secret.linkPreview },
           ...(last ? {
             reply_markup: {
               force_reply: true,
@@ -442,6 +444,7 @@ function handleStreamRequest(state, client, message) {
             message_thread_id: topic.threadId,
             text: htmlChunks[index],
             parse_mode: "HTML",
+            link_preview_options: { is_disabled: !state.secret.linkPreview },
           }, sourceChunks[index] || "");
         }
       }

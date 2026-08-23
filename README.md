@@ -73,9 +73,12 @@ Example non-secret configuration:
   "chatId": 123456789,
   "allowedUserId": 123456789,
   "bridgeSecret": "generated-random-value",
-  "port": 43871
+  "port": 43871,
+  "linkPreview": false
 }
 ```
+
+`linkPreview` defaults to `false`, which disables URL previews on notifications and persisted assistant messages. Set it to `true` to opt back in. Telegram's ephemeral `sendMessageDraft` method does not expose link preview options.
 
 ## pi-notify integration
 

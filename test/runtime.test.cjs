@@ -15,6 +15,13 @@ test("validates split secret/config settings", () => {
   });
   assert.equal(settings.chatId, 42);
   assert.equal(settings.port, 43871);
+  assert.equal(settings.linkPreview, false);
+  const enabled = runtime.__test.validateSettings(`123456:${"a".repeat(32)}`, {
+    chatId: 42,
+    bridgeSecret: "b".repeat(64),
+    linkPreview: true,
+  });
+  assert.equal(enabled.linkPreview, true);
 });
 
 test("builds stable topic names, chunks text, and rejects unthreaded fallback routing", () => {
@@ -197,7 +204,7 @@ async function emit(pi, event, payload, ctx) {
   assert.deepEqual(result.topicThreads, [701, 702]);
   assert.equal(result.mappings, 0);
   assert.equal(result.pendingReplies, 0);
-  assert.ok(result.notificationMessages.some((message) => message.parse_mode === "HTML" && message.text.includes("<b>Question &lt;one&gt;</b>") && message.text.includes("Reply <b>one</b>")));
+  assert.ok(result.notificationMessages.some((message) => message.parse_mode === "HTML" && message.link_preview_options?.is_disabled === true && message.text.includes("<b>Question &lt;one&gt;</b>") && message.text.includes("Reply <b>one</b>")));
   assert.ok(result.drafts.some((draft) => draft.parse_mode === "HTML" && draft.text === "Streaming hello"));
-  assert.ok(result.finalMessages.some((message) => message.parse_mode === "HTML" && message.text === "Streaming hello"));
+  assert.ok(result.finalMessages.some((message) => message.parse_mode === "HTML" && message.link_preview_options?.is_disabled === true && message.text === "Streaming hello"));
 });
