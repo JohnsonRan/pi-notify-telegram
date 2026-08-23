@@ -40,6 +40,7 @@ const STATE_ENTRY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const STATE_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const WAKE_REGISTRATION_TIMEOUT_MS = 15_000;
 const WAKE_STOP_TIMEOUT_MS = 5_000;
+const WAKE_STABILITY_TIMEOUT_MS = 1_500;
 
 const clientStates = new WeakMap();
 const attachedApis = new WeakSet();
@@ -451,6 +452,15 @@ async function waitForWakeStop(state, sessionId, timeoutMs = WAKE_STOP_TIMEOUT_M
   return !state.wakeLauncher.isRunning(sessionId);
 }
 
+async function waitForWakeStability(state, sessionId, timeoutMs = WAKE_STABILITY_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!state.wakeLauncher.isRunning(sessionId)) return false;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return state.wakeLauncher.isRunning(sessionId);
+}
+
 async function launchWakeSession(state, topic, prompt, replyTo) {
   if (state.wakeReservations.has(topic.sessionId)) return { started: false, reserved: true };
   state.wakeReservations.add(topic.sessionId);
@@ -464,12 +474,15 @@ async function launchWakeSession(state, topic, prompt, replyTo) {
       if (pending.sessionId === topic.sessionId) pending.holdForWake = true;
     }
     queuePersist(state).catch(() => {});
+    const preferForeground = state.secret.wakeOpenTerminal;
+    if (preferForeground) state.foregroundStartups.add(topic.sessionId);
     let launched = await state.wakeLauncher.launch({
       sessionId: topic.sessionId,
       cwd,
       sessionName: topic.name,
       prompt,
     });
+    if (!launched.foreground) state.foregroundStartups.delete(topic.sessionId);
     if (launched.started) {
       let mode = launched.foreground
         ? `Opening ${launched.terminal || "terminal"}`
@@ -480,26 +493,36 @@ async function launchWakeSession(state, topic, prompt, replyTo) {
         threadId: topic.threadId,
         replyTo,
       });
-      if (launched.foreground && !await waitForWakeRegistration(state, topic.sessionId)) {
-        state.wakeLauncher.cancel(topic.sessionId);
-        const stopped = await waitForWakeStop(state, topic.sessionId);
-        const connected = connectedTarget(state, topic.sessionId);
-        if (!connected && stopped) {
-          state.wakeReservations.add(topic.sessionId);
-          const fallback = await state.wakeLauncher.launch({
-            sessionId: topic.sessionId,
-            cwd,
-            sessionName: topic.name,
-            prompt,
-            openTerminal: false,
-          });
-          if (fallback.started) {
-            launched = fallback;
-            mode = "Terminal did not connect; switched to background mode";
-            await sendBrokerText(state, mode, { threadId: topic.threadId, replyTo });
+      if (launched.foreground) {
+        const registered = await waitForWakeRegistration(state, topic.sessionId);
+        const stable = registered ? await waitForWakeStability(state, topic.sessionId) : false;
+        if (!stable) {
+          state.wakeLauncher.cancel(topic.sessionId);
+          const stopped = await waitForWakeStop(state, topic.sessionId);
+          const connected = connectedTarget(state, topic.sessionId);
+          if (stopped) {
+            state.foregroundStartups.delete(topic.sessionId);
+            state.wakeReservations.add(topic.sessionId);
+            const fallback = await state.wakeLauncher.launch({
+              sessionId: topic.sessionId,
+              cwd,
+              sessionName: topic.name,
+              prompt,
+              openTerminal: false,
+            });
+            if (fallback.started) {
+              launched = fallback;
+              mode = registered
+                ? "Terminal exited during startup; switched to background mode"
+                : "Terminal did not connect; switched to background mode";
+              await sendBrokerText(state, mode, { threadId: topic.threadId, replyTo });
+            }
+          } else {
+            state.foregroundStartups.delete(topic.sessionId);
+            if (!connected) throw new Error("The terminal opened but Pi did not connect to the Telegram broker");
           }
-        } else if (!connected) {
-          throw new Error("The terminal opened but Pi did not connect to the Telegram broker");
+        } else {
+          state.foregroundStartups.delete(topic.sessionId);
         }
       }
     } else if (!state.wakeLauncher.isRunning(topic.sessionId)) {
@@ -507,6 +530,7 @@ async function launchWakeSession(state, topic, prompt, replyTo) {
     }
     return launched;
   } catch (error) {
+    state.foregroundStartups.delete(topic.sessionId);
     state.wakeReservations.delete(topic.sessionId);
     throw error;
   }
@@ -927,6 +951,7 @@ async function startLocalLeader(secret) {
     clients: new Map(),
     clientsBySession: new Map(),
     wakeReservations: new Set(),
+    foregroundStartups: new Set(),
     wakeLauncher: undefined,
     persistQueue: Promise.resolve(),
     cleanupTimer: undefined,
@@ -939,6 +964,7 @@ async function startLocalLeader(secret) {
     openTerminal: secret.wakeOpenTerminal,
     terminalSpecDir: path.join(AGENT_DIR, "terminal-launches"),
     onExit: async ({ sessionId, code, signal, cancelled, stderr }) => {
+      if (state.foregroundStartups.has(sessionId)) return;
       state.wakeReservations.delete(sessionId);
       if (code === 0 || cancelled) return;
       const topic = state.topics.get(sessionId);
@@ -1614,5 +1640,5 @@ module.exports = Object.freeze({
   attach,
   notify,
   runWakeDaemon,
-  __test: Object.freeze({ assistantText, findReplyTarget, formatLiveStatus, formatWakeExitDetail, handleControlMessage, normalizePiCommands, pruneExpiredBrokerState, splitTelegramText, startLocalLeader, subagentProgress, summarizeToolArgs, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStop }),
+  __test: Object.freeze({ assistantText, findReplyTarget, formatLiveStatus, formatWakeExitDetail, handleControlMessage, normalizePiCommands, pruneExpiredBrokerState, splitTelegramText, startLocalLeader, subagentProgress, summarizeToolArgs, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStability, waitForWakeStop }),
 });

@@ -55,15 +55,19 @@ test("validates split secret/config settings", () => {
   }), /wakeOpenTerminal must be a boolean/);
 });
 
-test("waits for foreground wake registration and stop state", async () => {
+test("waits for foreground wake registration, stability, and stop state", async () => {
   const client = { wakeChild: true, registered: true, socket: { destroyed: false } };
+  let running = true;
   const state = {
     clientsBySession: new Map(),
-    wakeLauncher: { isRunning: () => false },
+    wakeLauncher: { isRunning: () => running },
   };
   setTimeout(() => state.clientsBySession.set("session", client), 10);
   assert.equal(await runtime.__test.waitForWakeRegistration(state, "session", 200), client);
   assert.equal(await runtime.__test.waitForWakeRegistration(state, "missing", 10), undefined);
+  assert.equal(await runtime.__test.waitForWakeStability(state, "session", 10), true);
+  running = false;
+  assert.equal(await runtime.__test.waitForWakeStability(state, "session", 10), false);
   assert.equal(await runtime.__test.waitForWakeStop(state, "session", 10), true);
 });
 
