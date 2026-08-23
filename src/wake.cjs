@@ -199,6 +199,7 @@ class WakeLauncher {
       cwd,
       env: { ...wakeEnv, ...(launch.env || {}) },
       stdio: ["ignore", "ignore", "pipe"],
+      detached: true,
       windowsHide: launch.windowsHide,
     });
     if (terminalSpecPath) {

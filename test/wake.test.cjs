@@ -79,6 +79,7 @@ test("launches one full-permission Pi process per session", async () => {
   assert.equal(calls[0].options.env.PI_EXTENSION_UTILS_PROCESS_DOMAIN, undefined);
   assert.equal(calls[0].options.env.PI_CONTINUE_WATCHDOG_ROOT_PID, undefined);
   assert.equal(calls[0].options.windowsHide, true);
+  assert.equal(calls[0].options.detached, true);
   assert.deepEqual(calls[0].options.stdio, ["ignore", "ignore", "pipe"]);
   child.emit("close", 0, null);
   assert.equal(launcher.isRunning("session-1"), false);
@@ -122,6 +123,7 @@ test("opens an interactive Pi process through a tracked Windows terminal host", 
   assert.equal(calls[0].command, "C:\\Program Files\\PowerShell\\7\\pwsh.exe");
   assert.ok(calls[0].args.includes("-EncodedCommand"));
   assert.equal(calls[0].options.windowsHide, true);
+  assert.equal(calls[0].options.detached, true);
   const specPath = calls[0].options.env.PI_TELEGRAM_TERMINAL_SPEC_PATH;
   assert.ok(specPath);
   const spec = JSON.parse(await readFile(specPath, "utf8"));

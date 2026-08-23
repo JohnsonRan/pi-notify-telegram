@@ -33,6 +33,11 @@ function windowsTaskCommand(nodePath = process.execPath, daemonPath = DAEMON_PAT
   return `"${nodePath}" "${daemonPath}"`;
 }
 
+function windowsDaemonStopScript(daemonPath = DAEMON_PATH) {
+  const target = String(daemonPath).replace(/'/g, "''");
+  return `$target='${target}'; Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -and $_.CommandLine.IndexOf($target, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
+}
+
 function windowsTaskXml(
   nodePath = process.execPath,
   daemonPath = DAEMON_PATH,
@@ -45,26 +50,41 @@ function windowsTaskXml(
 }
 
 function systemdUnit(nodePath = process.execPath, daemonPath = DAEMON_PATH, agentDir = AGENT_DIR, environmentPath = process.env.PATH || "") {
-  return `[Unit]\nDescription=Pi Telegram wake broker\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${JSON.stringify(nodePath)} ${JSON.stringify(daemonPath)}\nEnvironment=${JSON.stringify(`PI_CODING_AGENT_DIR=${agentDir}`)}\nEnvironment=${JSON.stringify(`PATH=${environmentPath}`)}\nPassEnvironment=DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR\nRestart=always\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n`;
+  return `[Unit]\nDescription=Pi Telegram wake broker\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${JSON.stringify(nodePath)} ${JSON.stringify(daemonPath)}\nEnvironment=${JSON.stringify(`PI_CODING_AGENT_DIR=${agentDir}`)}\nEnvironment=${JSON.stringify(`PATH=${environmentPath}`)}\nPassEnvironment=DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR\nRestart=always\nRestartSec=3\nKillMode=process\n\n[Install]\nWantedBy=default.target\n`;
 }
 
 function launchAgent(nodePath = process.execPath, daemonPath = DAEMON_PATH, agentDir = AGENT_DIR, environmentPath = process.env.PATH || "") {
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${MAC_LABEL}</string>\n<key>ProgramArguments</key><array><string>${xml(nodePath)}</string><string>${xml(daemonPath)}</string></array>\n<key>EnvironmentVariables</key><dict><key>PI_CODING_AGENT_DIR</key><string>${xml(agentDir)}</string><key>PATH</key><string>${xml(environmentPath)}</string></dict>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n</dict></plist>\n`;
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${MAC_LABEL}</string>\n<key>ProgramArguments</key><array><string>${xml(nodePath)}</string><string>${xml(daemonPath)}</string></array>\n<key>EnvironmentVariables</key><dict><key>PI_CODING_AGENT_DIR</key><string>${xml(agentDir)}</string><key>PATH</key><string>${xml(environmentPath)}</string></dict>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n<key>AbandonProcessGroup</key><true/>\n</dict></plist>\n`;
+}
+
+function stopWindowsDaemonProcesses() {
+  run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", windowsDaemonStopScript()]);
+}
+
+function stopWindows() {
+  try { run("schtasks.exe", ["/End", "/TN", WINDOWS_TASK]); } catch {}
+  stopWindowsDaemonProcesses();
+}
+
+function startWindows() {
+  stopWindowsDaemonProcesses();
+  run("schtasks.exe", ["/Run", "/TN", WINDOWS_TASK]);
 }
 
 function installWindows() {
   const file = path.join(os.tmpdir(), `${SERVICE_NAME}-${process.pid}.xml`);
+  stopWindows();
   writeFileSync(file, `\uFEFF${windowsTaskXml()}`, { encoding: "utf16le" });
   try {
     run("schtasks.exe", ["/Create", "/TN", WINDOWS_TASK, "/XML", file, "/F"]);
   } finally {
     rmSync(file, { force: true });
   }
-  run("schtasks.exe", ["/Run", "/TN", WINDOWS_TASK]);
+  startWindows();
 }
 
 function uninstallWindows() {
-  try { run("schtasks.exe", ["/End", "/TN", WINDOWS_TASK]); } catch {}
+  stopWindows();
   run("schtasks.exe", ["/Delete", "/TN", WINDOWS_TASK, "/F"]);
 }
 
@@ -100,8 +120,8 @@ function serviceAction(action) {
   if (process.platform === "win32") {
     if (action === "install") return installWindows();
     if (action === "uninstall") return uninstallWindows();
-    if (action === "start") return run("schtasks.exe", ["/Run", "/TN", WINDOWS_TASK]);
-    if (action === "stop") return run("schtasks.exe", ["/End", "/TN", WINDOWS_TASK]);
+    if (action === "start") return startWindows();
+    if (action === "stop") return stopWindows();
     if (action === "status") return run("schtasks.exe", ["/Query", "/TN", WINDOWS_TASK, "/V", "/FO", "LIST"]);
   } else if (process.platform === "darwin") {
     const target = `gui/${process.getuid()}/${MAC_LABEL}`;
@@ -136,4 +156,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = Object.freeze({ launchAgent, serviceAction, systemdUnit, windowsTaskCommand, windowsTaskXml });
+module.exports = Object.freeze({ launchAgent, serviceAction, systemdUnit, windowsDaemonStopScript, windowsTaskCommand, windowsTaskXml });

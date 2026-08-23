@@ -121,7 +121,7 @@ The command selects the native service manager for the current platform:
 - macOS: `~/Library/LaunchAgents/com.johnsonran.pi-notify-telegram.plist`
 - Linux: `~/.config/systemd/user/pi-notify-telegram.service`
 
-Service lifecycle commands are `install`, `start`, `stop`, `status`, and `uninstall`. The daemon writes bounded diagnostics to `~/.pi/agent/pi-notify-telegram.log`; `status` also prints the resolved log path. The daemon waits if an older embedded broker still owns the port, then takes ownership automatically after that Pi process exits.
+Service lifecycle commands are `install`, `start`, `stop`, `status`, and `uninstall`. The daemon writes bounded diagnostics to `~/.pi/agent/pi-notify-telegram.log`; `status` also prints the resolved log path. The daemon waits if an older embedded broker still owns the port, then takes ownership automatically after that Pi process exits. Service stop, restart, reinstall, and update operations terminate only the broker daemon; Pi sessions previously opened by wake mode remain running and reconnect to the replacement broker.
 
 A running daemon keeps its loaded code after the package checkout updates. Restart it before testing a newly installed version:
 

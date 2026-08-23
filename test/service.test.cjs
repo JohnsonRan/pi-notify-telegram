@@ -1,17 +1,60 @@
 const assert = require("node:assert/strict");
-const { spawnSync } = require("node:child_process");
-const { existsSync, mkdtempSync, rmSync, writeFileSync } = require("node:fs");
+const { execFileSync, spawn, spawnSync } = require("node:child_process");
+const { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { launchAgent, systemdUnit, windowsTaskCommand, windowsTaskXml } = require("../service.cjs");
+const { launchAgent, systemdUnit, windowsDaemonStopScript, windowsTaskCommand, windowsTaskXml } = require("../service.cjs");
 
 test("builds a quoted Windows Scheduled Task command", () => {
   assert.equal(
     windowsTaskCommand("C:\\Program Files\\node.exe", "C:\\Pi Agent\\daemon.cjs"),
     '"C:\\Program Files\\node.exe" "C:\\Pi Agent\\daemon.cjs"',
   );
+});
+
+test("stops only the exact Windows daemon process without killing its Pi children", () => {
+  const script = windowsDaemonStopScript("C:\\Pi Agent\\daemon's.cjs");
+  assert.match(script, /Get-CimInstance Win32_Process/);
+  assert.match(script, /IndexOf\(\$target, \[System\.StringComparison\]::OrdinalIgnoreCase\)/);
+  assert.match(script, /Stop-Process -Id \$_.ProcessId -Force/);
+  assert.match(script, /daemon''s\.cjs/);
+  assert.doesNotMatch(script, /taskkill|\/T\b/i);
+});
+
+test("Windows daemon cleanup preserves child Pi processes", { skip: process.platform !== "win32" }, async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "pi telegram daemon cleanup test-"));
+  const fakeDaemon = path.join(directory, "fake daemon.cjs");
+  const fakePi = path.join(directory, "fake pi.cjs");
+  const marker = path.join(directory, "child-pid.txt");
+  writeFileSync(fakePi, "setInterval(() => {}, 1000);\n");
+  writeFileSync(fakeDaemon, `
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const child = spawn(process.execPath, [${JSON.stringify(fakePi)}], { detached: true, stdio: ["ignore", "ignore", "pipe"] });
+writeFileSync(${JSON.stringify(marker)}, String(child.pid));
+setInterval(() => {}, 1000);
+`);
+  const daemon = spawn(process.execPath, [fakeDaemon], { stdio: "ignore" });
+  let childPid;
+  try {
+    const deadline = Date.now() + 5_000;
+    while (!existsSync(marker) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    childPid = Number(readFileSync(marker, "utf8"));
+    assert.ok(Number.isInteger(childPid) && childPid > 0);
+    execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", windowsDaemonStopScript(fakeDaemon)]);
+    const exitDeadline = Date.now() + 5_000;
+    while (daemon.exitCode === null && Date.now() < exitDeadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.notEqual(daemon.exitCode, null, "the daemon process should stop");
+    assert.doesNotThrow(() => process.kill(childPid, 0), "the child Pi process should remain alive");
+  } finally {
+    if (daemon.exitCode === null) process.kill(daemon.pid);
+    if (childPid) {
+      try { process.kill(childPid); } catch {}
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("builds a hidden supervised unlimited-runtime Windows task", () => {
@@ -56,6 +99,7 @@ test("builds a restartable Linux systemd user unit", () => {
   assert.match(unit, /Environment="PATH=\/home\/me\/bin:\/usr\/bin"/);
   assert.match(unit, /PassEnvironment=DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR/);
   assert.match(unit, /Restart=always/);
+  assert.match(unit, /KillMode=process/);
   assert.match(unit, /WantedBy=default\.target/);
 });
 
@@ -66,4 +110,5 @@ test("builds a keep-alive macOS LaunchAgent with escaped paths", () => {
   assert.match(plist, /pi&lt;notify&gt;\/daemon\.cjs/);
   assert.match(plist, /\/opt\/homebrew\/bin:\/usr\/bin/);
   assert.match(plist, /<key>KeepAlive<\/key><true\/>/);
+  assert.match(plist, /<key>AbandonProcessGroup<\/key><true\/>/);
 });
