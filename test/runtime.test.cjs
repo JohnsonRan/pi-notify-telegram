@@ -322,6 +322,43 @@ test("prunes stale mappings and undelivered replies but retains topics", () => {
   assert.equal(runtime.__test.pruneExpiredBrokerState(state, now), false);
 });
 
+test("stream queue cleanup does not create an unhandled rejection", async () => {
+  const state = { streamQueues: new Map() };
+  const failure = runtime.__test.enqueueStream(state, "session", async () => {
+    throw new Error("rate limited");
+  });
+  await assert.rejects(failure, /rate limited/);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(state.streamQueues.size, 0);
+});
+
+test("retries a Telegram rate limit once using retry_after", async () => {
+  const originalFetch = global.fetch;
+  let calls = 0;
+  global.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return {
+        ok: false,
+        status: 429,
+        json: async () => ({ ok: false, description: "Too Many Requests", parameters: { retry_after: 0 } }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 1 } }) };
+  };
+  try {
+    const result = await runtime.__test.telegramCall(
+      { botToken: `123456:${"a".repeat(32)}` },
+      "sendMessageDraft",
+      { text: "status" },
+    );
+    assert.equal(result.message_id, 1);
+  } finally {
+    global.fetch = originalFetch;
+  }
+  assert.equal(calls, 2);
+});
+
 test("falls back to plain text only after a deterministic Telegram Bad Request", async () => {
   const originalFetch = global.fetch;
   const payloads = [];
@@ -519,7 +556,6 @@ async function emit(pi, event, payload, ctx) {
   assert.ok(result.notificationMessages.some((message) => message.parse_mode === "HTML" && message.link_preview_options?.is_disabled === true && message.text.includes("<b>Question &lt;one&gt;</b>") && message.text.includes("Reply <b>one</b>")));
   assert.ok(result.drafts.some((draft) => draft.text.includes("Main agent · Turn 1")));
   assert.ok(result.drafts.some((draft) => draft.text.includes("Subagents · 0/1 done · 1 running") && draft.text.includes("reviewer · read · src/runtime.cjs")));
-  assert.ok(result.drafts.some((draft) => draft.parse_mode === "HTML" && draft.text === "Streaming hello"));
   assert.ok(result.finalMessages.some((message) => message.parse_mode === "HTML" && message.link_preview_options?.is_disabled === true && message.text === "Streaming hello"));
   assert.ok(result.botCommandMenus.some((commands) => commands.some((command) => command.command === "new")));
   assert.ok(result.botCommandMenus.some((commands) => commands.some((command) => command.command === "ctx_stats")));

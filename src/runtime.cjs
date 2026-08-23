@@ -35,7 +35,7 @@ const MAX_TOPICS = 2000;
 const REQUEST_TIMEOUT_MS = 20_000;
 const HANDSHAKE_TIMEOUT_MS = 3_000;
 const PROTOCOL_VERSION = 2;
-const STREAM_THROTTLE_MS = 300;
+const STREAM_THROTTLE_MS = 1_200;
 const STATUS_HEARTBEAT_MS = 5_000;
 const DELIVERY_DEDUPE_MAX = 512;
 const STATE_ENTRY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -267,28 +267,35 @@ async function readSecret() {
 }
 
 async function telegramCall(secret, method, payload, timeoutMs = 20_000) {
-  let response;
-  try {
-    response = await fetch(`https://api.telegram.org/bot${secret.botToken}/${method}`, {
-      method: "POST",
-      headers: { "content-type": "application/json; charset=utf-8" },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (error) {
-    throw new Error(`Telegram ${method} failed: ${errorMessage(error)}`);
-  }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(`https://api.telegram.org/bot${secret.botToken}/${method}`, {
+        method: "POST",
+        headers: { "content-type": "application/json; charset=utf-8" },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (error) {
+      throw new Error(`Telegram ${method} failed: ${errorMessage(error)}`);
+    }
 
-  let result;
-  try {
-    result = await response.json();
-  } catch {
-    throw new Error(`Telegram ${method} returned invalid JSON (HTTP ${response.status})`);
-  }
-  if (!response.ok || result?.ok !== true) {
+    let result;
+    try {
+      result = await response.json();
+    } catch {
+      throw new Error(`Telegram ${method} returned invalid JSON (HTTP ${response.status})`);
+    }
+    if (response.ok && result?.ok === true) return result.result;
+
+    const retryAfter = Number(result?.parameters?.retry_after);
+    if (response.status === 429 && attempt === 0 && Number.isFinite(retryAfter) && retryAfter >= 0 && retryAfter <= 60) {
+      await new Promise((resolve) => setTimeout(resolve, retryAfter * 1_000 + 250));
+      continue;
+    }
     throw new Error(`Telegram ${method} failed: ${result?.description || `HTTP ${response.status}`}`);
   }
-  return result.result;
+  throw new Error(`Telegram ${method} failed after retry`);
 }
 
 async function telegramFormattedCall(secret, method, payload, plainText) {
@@ -470,9 +477,12 @@ function enqueueStream(state, sessionId, task) {
   const previous = state.streamQueues.get(sessionId) || Promise.resolve();
   const next = previous.catch(() => {}).then(task);
   state.streamQueues.set(sessionId, next);
-  next.finally(() => {
+  const cleanup = () => {
     if (state.streamQueues.get(sessionId) === next) state.streamQueues.delete(sessionId);
-  });
+  };
+  // Supplying both handlers prevents the ignored cleanup promise from
+  // mirroring a task rejection as an unhandled rejection.
+  next.then(cleanup, cleanup);
   return next;
 }
 
@@ -1806,5 +1816,5 @@ module.exports = Object.freeze({
   attach,
   notify,
   runWakeDaemon,
-  __test: Object.freeze({ RESTORE_CONTEXT_PROMPT, assistantText, controlKeyboard, controlPanel, findReplyTarget, formatBrokerStatus, formatDuration, formatLiveStatus, formatLocalTimestamp, formatWakeExitDetail, handleCallbackQuery, handleControlMessage, normalizePiCommands, parseControlCallback, parseRestoreCallback, pruneExpiredBrokerState, restoreSessionTopic, splitTelegramText, startLocalLeader, subagentProgress, summarizeToolArgs, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStability, waitForWakeStop }),
+  __test: Object.freeze({ RESTORE_CONTEXT_PROMPT, assistantText, controlKeyboard, controlPanel, enqueueStream, findReplyTarget, formatBrokerStatus, formatDuration, formatLiveStatus, formatLocalTimestamp, formatWakeExitDetail, handleCallbackQuery, handleControlMessage, normalizePiCommands, parseControlCallback, parseRestoreCallback, pruneExpiredBrokerState, restoreSessionTopic, splitTelegramText, startLocalLeader, subagentProgress, summarizeToolArgs, telegramCall, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings, waitForWakeRegistration, waitForWakeStability, waitForWakeStop }),
 });
