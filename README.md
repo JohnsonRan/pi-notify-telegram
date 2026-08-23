@@ -14,6 +14,7 @@ Each Pi session gets its own topic in the bot's private chat. Telegram replies a
 - Multiple concurrent Pi processes share one localhost broker and one `getUpdates` poller
 - Optional always-on wake daemon resumes a stopped Pi session when its topic receives a message
 - The unthreaded All Topics view provides explicit `/new`, `/sessions`, `/status`, and `/help` control commands
+- Pi extension, prompt-template, and skill commands are synchronized into Telegram's bot command menu
 - Cross-platform per-user services support Windows Scheduled Tasks, macOS LaunchAgents, and Linux systemd user units
 - Replies route by `message_thread_id`, so agents cannot consume each other's messages
 - Busy sessions receive Telegram input as `steer`; idle sessions start a normal turn
@@ -126,6 +127,14 @@ All Topics is command-only:
 ```
 
 Messages in an existing session topic wake that exact session. Ordinary unthreaded text never falls back to a globally "latest" session.
+
+## Pi command menu
+
+For each connected session, the extension reads `pi.getCommands()` and synchronizes invokable extension commands, prompt templates, and skills into Telegram with `setMyCommands`. Names that Telegram cannot represent directly are converted to stable lowercase aliases, for example `/ctx-stats` becomes `/ctx_stats` and `/skill:frontend-design` becomes `/skill_frontend_design`.
+
+Selecting an alias inside a session topic restores the original Pi command and dispatches it with `expandPromptTemplates: true`. The command mapping is stored with the topic, so it also works when that topic must wake a stopped session. The internal `/telegram-wake` command is never exposed.
+
+Telegram permits at most 100 bot commands. Wake controls occupy four entries, and up to 96 discovered Pi commands are published. Built-in interactive-only TUI commands such as `/model`, `/settings`, and `/hotkeys` are intentionally excluded because Pi does not expose them through `getCommands()` and they cannot execute through a remote prompt. Commands that open custom terminal UI may still require an interactive Pi window; prompt templates, skills, and headless extension commands work normally.
 
 Wake mode permits unattended model calls, file writes, and command execution. Keep the bot private and restrict `wakeAllowedRoots` to trusted directories.
 

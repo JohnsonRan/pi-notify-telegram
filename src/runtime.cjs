@@ -8,7 +8,7 @@
  */
 
 const { spawn } = require("node:child_process");
-const { randomInt, randomUUID } = require("node:crypto");
+const { createHash, randomInt, randomUUID } = require("node:crypto");
 const { readFile, writeFile, rename } = require("node:fs/promises");
 const net = require("node:net");
 const path = require("node:path");
@@ -43,8 +43,51 @@ const attachedApis = new WeakSet();
 let localLeaderPromise;
 let daemonLaunchPromise;
 
+const CONTROL_COMMANDS = Object.freeze([
+  { command: "new", description: "Create a new Pi session" },
+  { command: "sessions", description: "List known Pi sessions" },
+  { command: "status", description: "Show the Pi wake broker status" },
+  { command: "help", description: "Show Telegram wake commands" },
+]);
+
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function normalizePiCommands(commands) {
+  const used = new Set(CONTROL_COMMANDS.map((item) => item.command));
+  const result = [];
+  for (const item of Array.isArray(commands) ? commands : []) {
+    const name = String(item?.name || "").trim();
+    if (!name || name === "telegram-wake") continue;
+    const normalized = name.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
+    const hash = createHash("sha256").update(name).digest("hex").slice(0, 6);
+    let telegramName = normalized || `pi_${hash}`;
+    if (telegramName.length > 32 || used.has(telegramName)) {
+      telegramName = `${(normalized || "pi").slice(0, 25)}_${hash}`.slice(0, 32);
+    }
+    let suffix = 1;
+    const base = telegramName.slice(0, 29);
+    while (used.has(telegramName)) telegramName = `${base}_${suffix++}`.slice(0, 32);
+    used.add(telegramName);
+    const description = String(item?.description || `${item?.source || "Pi"} command: /${name}`)
+      .replace(/[\r\n]+/g, " ")
+      .trim()
+      .slice(0, 256) || `Run /${name}`;
+    result.push({ name, telegramName, description, source: String(item?.source || "extension") });
+    if (result.length >= 96) break;
+  }
+  return result;
+}
+
+function translateTelegramCommand(topic, text) {
+  const value = String(text || "");
+  const match = value.match(/^\/([^\s@]+)(?:@\w+)?([\s\S]*)$/);
+  if (!match) return value;
+  const command = Array.isArray(topic?.commands)
+    ? topic.commands.find((item) => item.telegramName === match[1] || item.name === match[1])
+    : undefined;
+  return command ? `/${command.name}${match[2] || ""}` : value;
 }
 
 function asInteger(value, name) {
@@ -260,10 +303,12 @@ async function ensureTopic(state, sessionId, cwd, sessionName) {
       threadId: created.message_thread_id,
       name: created.name,
       cwd: String(cwd || ""),
+      commands: state.sessionCommands.get(sessionId) || [],
       createdAt: Date.now(),
     };
     state.topics.set(sessionId, topic);
     await queuePersist(state);
+    syncTelegramCommandMenu(state).catch((error) => console.warn(`[pi-notify-telegram] Cannot sync bot commands: ${errorMessage(error)}`));
     return topic;
   })().finally(() => state.topicPromises.delete(sessionId));
   state.topicPromises.set(sessionId, promise);
@@ -330,6 +375,34 @@ function deliverPendingReply(state, pending) {
 function deliverPendingForSession(state, sessionId) {
   for (const pending of state.pendingReplies.values()) {
     if (pending.sessionId === sessionId && !pending.holdForWake) deliverPendingReply(state, pending);
+  }
+}
+
+async function syncTelegramCommandMenu(state) {
+  const commands = state.secret.wakeMode ? [...CONTROL_COMMANDS] : [];
+  const seen = new Set(commands.map((item) => item.command));
+  for (const topic of state.topics.values()) {
+    for (const item of Array.isArray(topic.commands) ? topic.commands : []) {
+      if (seen.has(item.telegramName) || commands.length >= 100) continue;
+      seen.add(item.telegramName);
+      commands.push({ command: item.telegramName, description: item.description.slice(0, 48) });
+    }
+  }
+  let published = commands;
+  for (;;) {
+    const signature = JSON.stringify(published);
+    if (signature === state.commandMenuSignature) return;
+    try {
+      await telegramCall(state.secret, "setMyCommands", {
+        scope: { type: "chat", chat_id: state.secret.chatId },
+        commands: published,
+      });
+      state.commandMenuSignature = signature;
+      return;
+    } catch (error) {
+      if (!/BOT_COMMANDS_TOO_MUCH/i.test(errorMessage(error)) || published.length <= CONTROL_COMMANDS.length + 10) throw error;
+      published = published.slice(0, Math.max(CONTROL_COMMANDS.length, published.length - 10));
+    }
   }
 }
 
@@ -479,6 +552,9 @@ async function handleTelegramMessage(state, message) {
     }).catch((error) => console.warn(`[pi-notify-telegram] ${errorMessage(error)}`));
     return;
   }
+
+  const targetTopic = state.topics.get(target.sessionId);
+  message = { ...message, text: translateTelegramCommand(targetTopic, message.text) };
 
   let holdForWake = false;
   if (!connectedTarget(state, target.sessionId) && state.secret.wakeMode) {
@@ -683,6 +759,14 @@ function handleBrokerRequest(state, client, message) {
     client.cwd = typeof message.cwd === "string" ? message.cwd : "";
     client.sessionName = typeof message.sessionName === "string" ? message.sessionName : "";
     client.wakeChild = message.wakeChild === true;
+    client.commands = normalizePiCommands(message.commands);
+    state.sessionCommands.set(client.sessionId, client.commands);
+    const topic = state.topics.get(client.sessionId);
+    if (topic) {
+      topic.commands = client.commands;
+      queuePersist(state).catch(() => {});
+      syncTelegramCommandMenu(state).catch((error) => console.warn(`[pi-notify-telegram] Cannot sync bot commands: ${errorMessage(error)}`));
+    }
     client.registered = true;
     if (!client.wakeChild && state.wakeReservations.has(client.sessionId)) {
       state.wakeLauncher.cancel(client.sessionId);
@@ -773,6 +857,8 @@ async function startLocalLeader(secret) {
     mappings: new Map(stored.mappings.map((item) => [item.messageId, item])),
     pendingReplies: new Map(stored.pendingReplies.map((item) => [item.deliveryId, item])),
     topics: new Map(stored.topics.map((item) => [item.sessionId, item])),
+    sessionCommands: new Map(stored.topics.map((item) => [item.sessionId, Array.isArray(item.commands) ? item.commands : []])),
+    commandMenuSignature: undefined,
     topicPromises: new Map(),
     streamQueues: new Map(),
     clients: new Map(),
@@ -822,6 +908,7 @@ async function startLocalLeader(secret) {
     localLeaderPromise = undefined;
   });
   server.unref?.();
+  syncTelegramCommandMenu(state).catch((error) => console.warn(`[pi-notify-telegram] Cannot sync bot commands: ${errorMessage(error)}`));
   pollTelegram(state).catch((error) => console.warn(`[pi-notify-telegram] Poller stopped: ${errorMessage(error)}`));
   return state;
 }
@@ -870,6 +957,7 @@ function registerClient(state) {
     sessionId: state.sessionId,
     cwd: state.cwd,
     sessionName: state.sessionName,
+    commands: state.commands,
     wakeChild: process.env.PI_TELEGRAM_WAKE_CHILD === "1",
   });
 }
@@ -1008,8 +1096,11 @@ function handleClientMessage(state, message) {
     return;
   }
   try {
-    if (state.ctx?.isIdle?.() === false) state.pi.sendUserMessage(message.text, { deliverAs: "steer" });
-    else state.pi.sendUserMessage(message.text);
+    if (state.ctx?.isIdle?.() === false) {
+      state.pi.sendUserMessage(message.text, { deliverAs: "steer", expandPromptTemplates: true });
+    } else {
+      state.pi.sendUserMessage(message.text, { expandPromptTemplates: true });
+    }
     rememberDelivery(state, message.deliveryId);
     sendAck(true);
   } catch (error) {
@@ -1040,6 +1131,20 @@ function rememberDelivery(state, deliveryId) {
   state.pi.appendEntry?.("pi_notify_telegram_delivery", { deliveryId });
 }
 
+function availablePiCommands(pi) {
+  try {
+    return (typeof pi.getCommands === "function" ? pi.getCommands() : [])
+      .filter((command) => command && typeof command.name === "string")
+      .map((command) => ({
+        name: command.name,
+        description: command.description,
+        source: command.source,
+      }));
+  } catch {
+    return [];
+  }
+}
+
 function clientStateFor(pi, ctx, notification) {
   let state = clientStates.get(pi);
   if (!state) {
@@ -1051,6 +1156,7 @@ function clientStateFor(pi, ctx, notification) {
       sessionId: String(notification.sessionId || ctx?.sessionManager?.getSessionId?.() || ""),
       cwd: String(notification.cwd || ctx?.cwd || ""),
       sessionName: String(pi.getSessionName?.() || ""),
+      commands: availablePiCommands(pi),
       socket: undefined,
       connected: false,
       ready: undefined,
@@ -1069,10 +1175,13 @@ function clientStateFor(pi, ctx, notification) {
       const nextSessionId = String(liveCtx.sessionManager.getSessionId() || "");
       const nextCwd = String(liveCtx.cwd || "");
       const nextSessionName = String(pi.getSessionName?.() || "");
-      const changed = state.sessionId !== nextSessionId || state.cwd !== nextCwd || state.sessionName !== nextSessionName;
+      const nextCommands = availablePiCommands(pi);
+      const changed = state.sessionId !== nextSessionId || state.cwd !== nextCwd || state.sessionName !== nextSessionName ||
+        JSON.stringify(state.commands) !== JSON.stringify(nextCommands);
       state.sessionId = nextSessionId;
       state.cwd = nextCwd;
       state.sessionName = nextSessionName;
+      state.commands = nextCommands;
       if (changed) {
         hydrateSeenDeliveries(state);
         registerClient(state);
@@ -1093,10 +1202,13 @@ function clientStateFor(pi, ctx, notification) {
   const nextSessionId = String(notification.sessionId || "");
   const nextCwd = String(notification.cwd || "");
   const nextSessionName = String(pi.getSessionName?.() || "");
-  const changed = state.sessionId !== nextSessionId || state.cwd !== nextCwd || state.sessionName !== nextSessionName;
+  const nextCommands = availablePiCommands(pi);
+  const changed = state.sessionId !== nextSessionId || state.cwd !== nextCwd || state.sessionName !== nextSessionName ||
+    JSON.stringify(state.commands) !== JSON.stringify(nextCommands);
   state.sessionId = nextSessionId;
   state.cwd = nextCwd;
   state.sessionName = nextSessionName;
+  state.commands = nextCommands;
   if (changed) {
     hydrateSeenDeliveries(state);
     if (state.connected) registerClient(state);
@@ -1282,5 +1394,5 @@ module.exports = Object.freeze({
   attach,
   notify,
   runWakeDaemon,
-  __test: Object.freeze({ assistantText, findReplyTarget, handleControlMessage, pruneExpiredBrokerState, splitTelegramText, startLocalLeader, telegramFormattedCall, topicName, validateSettings }),
+  __test: Object.freeze({ assistantText, findReplyTarget, handleControlMessage, normalizePiCommands, pruneExpiredBrokerState, splitTelegramText, startLocalLeader, telegramFormattedCall, topicName, translateTelegramCommand, validateSettings }),
 });

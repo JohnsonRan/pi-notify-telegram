@@ -68,7 +68,7 @@ class WakeLauncher {
     return true;
   }
 
-  async launch({ sessionId, cwd, sessionName, prompt }) {
+  async launch({ sessionId, cwd, sessionName, prompt, expandPromptTemplates = true }) {
     if (this.running.has(sessionId)) return { started: false, process: this.running.get(sessionId) };
     const args = [
       ...this.piCommandArgs,
@@ -76,11 +76,19 @@ class WakeLauncher {
       "--name", String(sessionName || path.basename(cwd) || "Telegram"),
       "--print",
       "--approve",
-      `Telegram message:\n${String(prompt || "")}`,
+      "/telegram-wake",
     ];
+    const wakePayload = Buffer.from(JSON.stringify({
+      text: String(prompt || ""),
+      expandPromptTemplates: expandPromptTemplates === true,
+    }), "utf8").toString("base64url");
     const child = this.spawn(this.piCommand, args, {
       cwd,
-      env: { ...process.env, PI_TELEGRAM_WAKE_CHILD: "1" },
+      env: {
+        ...process.env,
+        PI_TELEGRAM_WAKE_CHILD: "1",
+        PI_TELEGRAM_WAKE_PAYLOAD: wakePayload,
+      },
       stdio: "ignore",
       windowsHide: true,
     });

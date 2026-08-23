@@ -50,14 +50,22 @@ test("launches one full-permission Pi process per session", async () => {
   assert.equal(second.started, false);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, "pi-test");
-  assert.deepEqual(calls[0].args, ["--session-id", "session-1", "--name", "Test", "--print", "--approve", "Telegram message:\nhello"]);
+  assert.deepEqual(calls[0].args, ["--session-id", "session-1", "--name", "Test", "--print", "--approve", "/telegram-wake"]);
+  assert.deepEqual(
+    JSON.parse(Buffer.from(calls[0].options.env.PI_TELEGRAM_WAKE_PAYLOAD, "base64url").toString("utf8")),
+    { text: "hello", expandPromptTemplates: true },
+  );
   assert.equal(calls[0].options.windowsHide, true);
   child.emit("exit", 0, null);
   assert.equal(launcher.isRunning("session-1"), false);
 
   for (const prompt of ["--help", "--no-tools", "--session-id other", "@sensitive-file"]) {
     await launcher.launch({ sessionId: prompt, cwd: process.cwd(), sessionName: "Test", prompt });
-    assert.equal(calls.at(-1).args.at(-1), `Telegram message:\n${prompt}`);
+    assert.equal(calls.at(-1).args.at(-1), "/telegram-wake");
+    assert.equal(
+      JSON.parse(Buffer.from(calls.at(-1).options.env.PI_TELEGRAM_WAKE_PAYLOAD, "base64url").toString("utf8")).text,
+      prompt,
+    );
     child.emit("exit", 0, null);
   }
 });

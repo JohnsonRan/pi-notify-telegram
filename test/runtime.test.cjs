@@ -38,6 +38,22 @@ test("validates split secret/config settings", () => {
   assert.deepEqual(wake.wakeAllowedRoots, ["F:\\"]);
 });
 
+test("maps Pi command names to Telegram-safe aliases and restores them", () => {
+  const commands = runtime.__test.normalizePiCommands([
+    { name: "review", description: "Review code", source: "extension" },
+    { name: "reload-runtime", description: "Reload", source: "extension" },
+    { name: "skill:frontend-design", description: "Design", source: "skill" },
+    { name: "status", description: "Pi status", source: "extension" },
+    { name: "telegram-wake", description: "internal", source: "extension" },
+  ]);
+  assert.equal(commands.length, 4);
+  assert.equal(commands[0].telegramName, "review");
+  assert.equal(commands[1].telegramName, "reload_runtime");
+  assert.notEqual(commands[3].telegramName, "status");
+  const skill = commands.find((command) => command.name === "skill:frontend-design");
+  assert.equal(runtime.__test.translateTelegramCommand({ commands }, `/${skill.telegramName} mobile`), "/skill:frontend-design mobile");
+});
+
 test("builds stable topic names, chunks text, and rejects unthreaded fallback routing", () => {
   assert.equal(runtime.__test.topicName("1234567890", "C:/work/demo", ""), "demo · 12345678");
   const chunks = runtime.__test.splitTelegramText("x".repeat(9000));
@@ -113,10 +129,15 @@ const notificationByThread = new Map();
 const notificationMessages = [];
 const drafts = [];
 const finalMessages = [];
+const botCommandMenus = [];
 
 global.fetch = async (url, options) => {
   const method = url.split("/").pop();
   const body = JSON.parse(options.body);
+  if (method === "setMyCommands") {
+    botCommandMenus.push(body.commands);
+    return response(true);
+  }
   if (method === "createForumTopic") {
     const threadId = ++nextThread;
     return response({ message_thread_id: threadId, name: body.name });
@@ -142,7 +163,7 @@ global.fetch = async (url, options) => {
         message: {
           message_id: 200 + index,
           message_thread_id: threadId,
-          text: index === 0 ? "/status" : "reply-two",
+          text: index === 0 ? "/ctx_stats" : "/status",
           chat: { id: 42 },
           from: { id: 42, is_bot: false },
         },
@@ -170,6 +191,13 @@ function fakePi(name) {
       handlers.set(event, list);
     },
     getSessionName() { return name; },
+    getCommands() {
+      return [
+        { name: "ctx-stats", description: "Show context stats", source: "extension" },
+        { name: "skill:frontend-design", description: "Design a frontend", source: "skill" },
+        { name: "telegram-wake", description: "internal", source: "extension" },
+      ];
+    },
     sendUserMessage(text, options) { injected.push({ text, options }); },
   };
 }
@@ -214,6 +242,7 @@ async function emit(pi, event, payload, ctx) {
     notificationMessages,
     drafts,
     finalMessages,
+    botCommandMenus,
   };
   console.log(JSON.stringify(result));
   process.exit(0);
@@ -229,8 +258,8 @@ async function emit(pi, event, payload, ctx) {
   });
   assert.equal(child.status, 0, child.stderr || child.stdout);
   const result = JSON.parse(child.stdout.trim());
-  assert.deepEqual(result.pi1.map((item) => item.text), ["/status"]);
-  assert.deepEqual(result.pi2.map((item) => item.text), ["reply-two"]);
+  assert.deepEqual(result.pi1.map((item) => item.text), ["/ctx-stats"]);
+  assert.deepEqual(result.pi2.map((item) => item.text), ["/status"]);
   assert.equal(result.topicCount, 2);
   assert.deepEqual(result.topicThreads, [701, 702]);
   assert.equal(result.mappings, 0);
@@ -238,4 +267,8 @@ async function emit(pi, event, payload, ctx) {
   assert.ok(result.notificationMessages.some((message) => message.parse_mode === "HTML" && message.link_preview_options?.is_disabled === true && message.text.includes("<b>Question &lt;one&gt;</b>") && message.text.includes("Reply <b>one</b>")));
   assert.ok(result.drafts.some((draft) => draft.parse_mode === "HTML" && draft.text === "Streaming hello"));
   assert.ok(result.finalMessages.some((message) => message.parse_mode === "HTML" && message.link_preview_options?.is_disabled === true && message.text === "Streaming hello"));
+  assert.ok(result.botCommandMenus.some((commands) => commands.some((command) => command.command === "new")));
+  assert.ok(result.botCommandMenus.some((commands) => commands.some((command) => command.command === "ctx_stats")));
+  assert.ok(result.botCommandMenus.every((commands) => commands.every((command) => command.command !== "telegram_wake")));
+  assert.equal(result.pi1[0].options.expandPromptTemplates, true);
 });

@@ -69,6 +69,22 @@ export default function piNotifyTelegram(pi: ExtensionAPI): void {
   // topic would duplicate output and expose internal worker conversations.
   if (process.env.PI_SUBAGENT_CHILD === "1") return;
 
+  pi.registerCommand("telegram-wake", {
+    description: "Internal command used by the Telegram wake daemon",
+    handler: async () => {
+      const encoded = process.env.PI_TELEGRAM_WAKE_PAYLOAD;
+      delete process.env.PI_TELEGRAM_WAKE_PAYLOAD;
+      if (!encoded) return;
+      const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as {
+        text?: unknown;
+        expandPromptTemplates?: unknown;
+      };
+      const text = String(payload.text ?? "");
+      if (!text) return;
+      pi.sendUserMessage(text, { expandPromptTemplates: payload.expandPromptTemplates === true });
+    },
+  });
+
   runtime.attach(pi);
 
   let liveContext: ExtensionContext | undefined;

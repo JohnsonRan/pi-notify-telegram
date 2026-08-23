@@ -13,7 +13,7 @@ const path = require("node:path");
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-notify-telegram-wake-runtime-"));
 const launchLog = path.join(dir, "launches.jsonl");
 const fakePi = path.join(dir, "fake-pi.cjs");
-fs.writeFileSync(fakePi, "require('node:fs').appendFileSync(" + JSON.stringify(launchLog) + ", JSON.stringify(process.argv.slice(2)) + '\\n');\n");
+fs.writeFileSync(fakePi, "const fs=require('node:fs'); const payload=JSON.parse(Buffer.from(process.env.PI_TELEGRAM_WAKE_PAYLOAD,'base64url').toString('utf8')); fs.appendFileSync(" + JSON.stringify(launchLog) + ", JSON.stringify({args:process.argv.slice(2),payload}) + '\\n');\n");
 fs.writeFileSync(path.join(dir, "pi-notify-telegram.state.json"), JSON.stringify({ offset: 0, mappings: [], pendingReplies: [], topics: [] }));
 process.env.PI_CODING_AGENT_DIR = dir;
 
@@ -24,6 +24,7 @@ const sent = [];
 global.fetch = async (url, options) => {
   const method = url.split("/").pop();
   const body = JSON.parse(options.body);
+  if (method === "setMyCommands") return response(true);
   if (method === "createForumTopic") {
     threadId = 801;
     return response({ message_thread_id: threadId, name: body.name });
@@ -84,10 +85,12 @@ function response(result) { return { ok: true, status: 200, json: async () => ({
   const result = JSON.parse(child.stdout.trim());
   assert.equal(result.topics.length, 1);
   assert.equal(result.launches.length, 2);
-  const firstSessionId = result.launches[0][1];
-  assert.deepEqual(result.launches[0].slice(-3), ["--print", "--approve", "Telegram message:\nfirst prompt"]);
-  assert.equal(result.launches[1][1], firstSessionId);
-  assert.deepEqual(result.launches[1].slice(-3), ["--print", "--approve", "Telegram message:\nsecond prompt"]);
+  const firstSessionId = result.launches[0].args[1];
+  assert.deepEqual(result.launches[0].args.slice(-3), ["--print", "--approve", "/telegram-wake"]);
+  assert.deepEqual(result.launches[0].payload, { text: "first prompt", expandPromptTemplates: true });
+  assert.equal(result.launches[1].args[1], firstSessionId);
+  assert.deepEqual(result.launches[1].args.slice(-3), ["--print", "--approve", "/telegram-wake"]);
+  assert.deepEqual(result.launches[1].payload, { text: "second prompt", expandPromptTemplates: true });
   assert.ok(result.sent.some((message) => message.message_thread_id === 801 && /New Pi session/.test(message.text)));
   assert.ok(result.sent.filter((message) => /Waking Pi session/.test(message.text)).length >= 2);
 });
