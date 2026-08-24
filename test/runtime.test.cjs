@@ -231,6 +231,47 @@ test("answers and applies authorized Telegram control callbacks", async () => {
   assert.match(helpers.RESTORE_CONTEXT_PROMPT, /Do not modify files or run tools/);
 });
 
+test("acknowledges accepted Telegram messages with a non-blocking reaction", async () => {
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url, options) => {
+    calls.push({ method: url.split("/").pop(), body: JSON.parse(options.body) });
+    return { ok: true, status: 200, json: async () => ({ ok: true, result: true }) };
+  };
+  try {
+    const acknowledged = await helpers.acknowledgeTelegramMessage({
+      secret: { botToken: `123456:${"a".repeat(32)}`, chatId: 42 },
+    }, { message_id: 91 });
+    assert.equal(acknowledged, true);
+  } finally {
+    global.fetch = originalFetch;
+  }
+  assert.deepEqual(calls, [{
+    method: "setMessageReaction",
+    body: {
+      chat_id: 42,
+      message_id: 91,
+      reaction: [{ type: "emoji", emoji: "👀" }],
+      is_big: false,
+    },
+  }]);
+});
+
+test("reaction failures do not reject accepted Telegram message handling", async () => {
+  const originalFetch = global.fetch;
+  const originalWarn = console.warn;
+  global.fetch = async () => { throw new Error("offline"); };
+  console.warn = () => {};
+  try {
+    assert.equal(await helpers.acknowledgeTelegramMessage({
+      secret: { botToken: `123456:${"a".repeat(32)}`, chatId: 42 },
+    }, { message_id: 92 }), false);
+  } finally {
+    global.fetch = originalFetch;
+    console.warn = originalWarn;
+  }
+});
+
 test("delivers Telegram question button answers to the matching session", async () => {
   const originalFetch = global.fetch;
   const calls = [];
@@ -593,6 +634,7 @@ const notificationMessages = [];
 const drafts = [];
 const finalMessages = [];
 const botCommandMenus = [];
+const reactions = [];
 
 global.fetch = async (url, options) => {
   const method = url.split("/").pop();
@@ -616,6 +658,10 @@ global.fetch = async (url, options) => {
       notificationMessages.push(body);
     } else finalMessages.push(body);
     return response(sent);
+  }
+  if (method === "setMessageReaction") {
+    reactions.push(body);
+    return response(true);
   }
   if (["pinChatMessage", "editMessageText", "sendChatAction"].includes(method)) return response(true);
   if (method === "getUpdates") {
@@ -720,6 +766,7 @@ async function emit(pi, event, payload, ctx) {
     drafts,
     finalMessages,
     botCommandMenus,
+    reactions,
   };
   console.log(JSON.stringify(result));
   process.exit(0);
@@ -748,5 +795,7 @@ async function emit(pi, event, payload, ctx) {
   assert.ok(result.botCommandMenus.some((commands) => commands.some((command) => command.command === "new")));
   assert.ok(result.botCommandMenus.some((commands) => commands.some((command) => command.command === "ctx_stats")));
   assert.ok(result.botCommandMenus.every((commands) => commands.every((command) => command.command !== "telegram_wake")));
+  assert.deepEqual(result.reactions.map((reaction) => reaction.message_id).sort((a, b) => a - b), [200, 201]);
+  assert.ok(result.reactions.every((reaction) => reaction.reaction[0].emoji === "👀"));
   assert.equal(result.pi1[0].options.expandPromptTemplates, true);
 });

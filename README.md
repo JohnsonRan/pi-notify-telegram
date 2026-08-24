@@ -161,6 +161,7 @@ Messages in an existing session topic wake that exact session. Ordinary unthread
 - Every session topic gets one pinned status dashboard that is edited in place with connection, working, question, upload, and ready states.
 - Dashboard and notification buttons provide Continue, Stop, Retry, and Refresh status actions. Stop calls Pi's abort API directly instead of injecting a textual command.
 - Pi can call `telegram_ask_user_question` to render multiple-choice Telegram buttons and wait for the selected answer in the same tool call. Regular local `ask_user_question` prompts still produce a notification but remain local to Pi's terminal UI.
+- Accepted Telegram messages receive a non-blocking 👀 reaction after they are delivered, queued, or used to start the matching Pi session. Telegram does not expose a normal Bot API method for changing the client's true unread state.
 - Telegram chat actions show typing and document-upload activity while Pi is working.
 
 ## Pi command menu

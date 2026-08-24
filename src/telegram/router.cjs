@@ -343,6 +343,22 @@ function releaseWakeFollowups(state, sessionId) {
   queuePersist(state).catch(() => {});
 }
 
+async function acknowledgeTelegramMessage(state, message) {
+  if (!Number.isSafeInteger(message?.message_id)) return false;
+  try {
+    await telegramCall(state.secret, "setMessageReaction", {
+      chat_id: state.secret.chatId,
+      message_id: message.message_id,
+      reaction: [{ type: "emoji", emoji: "👀" }],
+      is_big: false,
+    });
+    return true;
+  } catch (error) {
+    console.warn(`[pi-notify-telegram] Cannot acknowledge Telegram message: ${errorMessage(error)}`);
+    return false;
+  }
+}
+
 async function handleTelegramMessage(state, message) {
   if (!message) return;
   if (message.chat?.id !== state.secret.chatId || message.from?.id !== state.secret.allowedUserId) return;
@@ -388,6 +404,7 @@ async function handleTelegramMessage(state, message) {
   if (state.secret.wakeMode && !threadIsKnown) {
     try {
       await handleControlMessage(state, message);
+      acknowledgeTelegramMessage(state, message).catch(() => {});
     } catch (error) {
       await sendBrokerText(state, `Command failed: ${errorMessage(error)}`, {
         replyTo: message.message_id,
@@ -420,7 +437,10 @@ async function handleTelegramMessage(state, message) {
       } else {
         try {
           const launched = await launchWakeSession(state, topic, message.text, message.message_id);
-          if (launched.started) return;
+          if (launched.started) {
+            acknowledgeTelegramMessage(state, message).catch(() => {});
+            return;
+          }
           holdForWake = launched.reserved === true;
         } catch (error) {
           await sendBrokerText(state, `Could not wake Pi: ${errorMessage(error)}`, {
@@ -444,6 +464,7 @@ async function handleTelegramMessage(state, message) {
   }
 
   const queued = await queueTelegramReply(state, target, message, holdForWake);
+  acknowledgeTelegramMessage(state, message).catch(() => {});
   if (!queued.delivered) {
     await telegramCall(state.secret, "sendMessage", {
       chat_id: state.secret.chatId,
@@ -659,6 +680,7 @@ module.exports = Object.freeze({
   syncTelegramCommandMenu,
   withTopicRetry,
   __test: Object.freeze({
+    acknowledgeTelegramMessage,
     findReplyTarget,
     handleCallbackQuery,
     handleControlMessage,
