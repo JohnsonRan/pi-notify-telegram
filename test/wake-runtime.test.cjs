@@ -42,7 +42,7 @@ global.fetch = async (url, options) => {
       message: { message_id: 1, text: "/new | first prompt", chat: { id: 42 }, from: { id: 42, is_bot: false } },
     }]);
     if (poll === 2) {
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      await new Promise((resolve) => setTimeout(resolve, 400));
       return response([{
         update_id: 2,
         message: { message_id: 2, message_thread_id: 801, text: "second prompt", chat: { id: 42 }, from: { id: 42, is_bot: false } },

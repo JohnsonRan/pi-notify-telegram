@@ -8,7 +8,7 @@ const { WINDOWS_DAEMON_MARKER } = require("../shared/paths.cjs");
 const { readSettings: readSecret } = require("../shared/settings.cjs");
 const { errorMessage } = require("../telegram/api.cjs");
 
-const DAEMON_PATH = path.join(__dirname, "..", "daemon.cjs");
+const DAEMON_PATH = path.join(__dirname, "..", "..", "daemon.cjs");
 const REQUEST_TIMEOUT_MS = 20_000;
 const HANDSHAKE_TIMEOUT_MS = 3_000;
 const DELIVERY_DEDUPE_MAX = 512;
@@ -171,11 +171,24 @@ function handleClientMessage(state, message) {
   }
   if (message?.type === "result" && typeof message.requestId === "string") {
     const pending = state.pending.get(message.requestId);
-    if (!pending) return;
-    state.pending.delete(message.requestId);
-    clearTimeout(pending.timer);
-    if (message.ok === true) pending.resolve(message);
-    else pending.reject(new Error(message.error || "Telegram notification failed"));
+    if (pending) {
+      state.pending.delete(message.requestId);
+      clearTimeout(pending.timer);
+      if (message.ok === true) pending.resolve(message);
+      else pending.reject(new Error(message.error || "Telegram notification failed"));
+    }
+    if (typeof message.questionId === "string" && state.socket && !state.socket.destroyed) {
+      sendLine(state.socket, {
+        type: "questionAck",
+        auth: state.secret.bridgeSecret,
+        sessionId: state.sessionId,
+        questionId: message.questionId,
+      });
+    }
+    return;
+  }
+  if (message?.type === "control" && message.sessionId === state.sessionId && message.action === "stop") {
+    state.pi.abort?.();
     return;
   }
   if (message?.type !== "reply" || typeof message.text !== "string" || typeof message.deliveryId !== "string") return;
@@ -325,14 +338,14 @@ function clientStateFor(pi, ctx, notification) {
   return state;
 }
 
-async function requestBroker(state, payload, timeoutLabel) {
+async function requestBroker(state, payload, timeoutLabel, timeoutMs = REQUEST_TIMEOUT_MS) {
   await connectClient(state);
   const requestId = randomUUID();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       state.pending.delete(requestId);
       reject(new Error(`${timeoutLabel} timed out`));
-    }, REQUEST_TIMEOUT_MS);
+    }, timeoutMs);
     timer.unref?.();
     state.pending.set(requestId, { resolve, reject, timer });
     sendLine(state.socket, {
@@ -352,6 +365,22 @@ function requestNotification(state, title, body) {
     cwd: state.cwd,
     sessionName: state.sessionName,
   }, "Telegram notification");
+}
+
+function requestArtifact(state, filePath, caption) {
+  return requestBroker(state, {
+    type: "artifact",
+    path: String(filePath || ""),
+    caption: String(caption || ""),
+  }, "Telegram artifact upload", 75_000);
+}
+
+function requestQuestion(state, question, options) {
+  return requestBroker(state, {
+    type: "question",
+    question: String(question || "Pi needs your input"),
+    options: Array.isArray(options) ? options.map(String) : [],
+  }, "Telegram question", 24 * 60 * 60 * 1_000);
 }
 
 async function initializeState(pi, ctx) {
@@ -377,4 +406,4 @@ function getClientState(pi) {
   return clientStates.get(pi);
 }
 
-module.exports = Object.freeze({ clientStateFor, connectClient, getClientState, initializeState, requestBroker, requestNotification });
+module.exports = Object.freeze({ clientStateFor, connectClient, getClientState, initializeState, requestArtifact, requestBroker, requestNotification, requestQuestion });

@@ -67,6 +67,18 @@ test("rerunning setup preserves config when the previous state file is missing",
   assert.equal(merged.state, state);
 });
 
+test("rerunning setup preserves pending Telegram questions", async () => {
+  const config = { chatId: 42, allowedUserId: 42, port: 43871 };
+  const state = { offset: 0, mappings: [], pendingReplies: [], pendingQuestions: [], topics: [] };
+  const question = { questionId: "q1", sessionId: "s1", options: ["Yes", "No"] };
+  const read = async (file) => JSON.stringify(file.endsWith("pi-notify-telegram.json")
+    ? config
+    : { offset: 8, mappings: [], pendingReplies: [], pendingQuestions: [question], topics: [] });
+  const merged = await mergePreviousInstallation(config, state, { chat: { id: 42 }, from: { id: 42 } }, read);
+  assert.equal(merged.state.offset, 8);
+  assert.deepEqual(merged.state.pendingQuestions, [question]);
+});
+
 test("stages all setup files before replacing their destinations", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "pi-notify-telegram-setup-stage-"));
   const first = path.join(directory, "first");

@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, ToolExecutionStartEvent } from "@earendil-works/pi-coding-agent";
 import { createRequire } from "node:module";
 import { hostname } from "node:os";
+import { Type } from "typebox";
 
 const require = createRequire(import.meta.url);
 const { decodeWakePayload, WAKE_SENTINEL } = require("./src/wake/payload.cjs") as {
@@ -8,6 +9,7 @@ const { decodeWakePayload, WAKE_SENTINEL } = require("./src/wake/payload.cjs") a
   WAKE_SENTINEL: string;
 };
 const runtime = require("./src/runtime.cjs") as {
+  askQuestion(pi: ExtensionAPI, ctx: ExtensionContext, question: string, options: string[]): Promise<string>;
   attach(pi: ExtensionAPI): void;
   notify(
     pi: ExtensionAPI,
@@ -16,6 +18,7 @@ const runtime = require("./src/runtime.cjs") as {
     title: string,
     body: string,
   ): Promise<void>;
+  sendFile(pi: ExtensionAPI, ctx: ExtensionContext, filePath: string, caption?: string): Promise<void>;
 };
 
 const SEMANTIC_HOOK_CHANNEL = "pi:semantic-hook:v1";
@@ -81,6 +84,42 @@ export default function piNotifyTelegram(pi: ExtensionAPI): void {
     delete process.env.PI_TELEGRAM_WAKE_PAYLOAD;
     const payload = decodeWakePayload(encoded);
     return { action: "transform", text: payload.text };
+  });
+
+  pi.registerTool({
+    name: "telegram_send_file",
+    label: "Send file to Telegram",
+    description: "Send a file or image from the current working directory to this Pi session's private Telegram topic.",
+    promptSnippet: "Send a generated file or image to the user's Telegram topic.",
+    parameters: Type.Object({
+      path: Type.String({ minLength: 1, description: "File path inside the current session working directory" }),
+      caption: Type.Optional(Type.String({ description: "Optional Telegram caption" })),
+    }, { additionalProperties: false }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      await runtime.sendFile(pi, ctx, params.path, params.caption);
+      return {
+        content: [{ type: "text", text: `Sent ${params.path} to Telegram.` }],
+        details: { path: params.path },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "telegram_ask_user_question",
+    label: "Ask user on Telegram",
+    description: "Ask the user a multiple-choice question in this session's Telegram topic and wait for the selected answer. Use this instead of ask_user_question when the user is working remotely through Telegram.",
+    promptSnippet: "Ask the remote user a multiple-choice question through Telegram and wait for the answer.",
+    parameters: Type.Object({
+      question: Type.String({ minLength: 1, description: "Question shown to the user" }),
+      options: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 10, description: "Selectable answers" }),
+    }, { additionalProperties: false }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const answer = await runtime.askQuestion(pi, ctx, params.question, params.options);
+      return {
+        content: [{ type: "text", text: `The user selected: ${answer}` }],
+        details: { question: params.question, answer },
+      };
+    },
   });
 
   runtime.attach(pi);

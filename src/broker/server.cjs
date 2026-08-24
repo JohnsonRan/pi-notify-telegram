@@ -1,9 +1,13 @@
+const { randomUUID } = require("node:crypto");
 const net = require("node:net");
 const path = require("node:path");
 const { PROTOCOL_VERSION, attachLineReader, sendLine } = require("../bridge/protocol.cjs");
 const { pruneExpiredBrokerState, queuePersist, readBrokerState, trimMappings } = require("./state.cjs");
 const { formatWakeExitDetail, normalizePiCommands } = require("../telegram/control.cjs");
 const { escapeHtml, renderTelegramChunkPairs, renderTelegramHtml, splitMarkdown } = require("../telegram/format.cjs");
+const { sendSessionArtifact } = require("../telegram/files.cjs");
+const { dashboardKeyboard, sendTopicChatAction, syncTopicDashboard } = require("../telegram/dashboard.cjs");
+const { questionKeyboard } = require("../telegram/questions.cjs");
 const { AGENT_DIR } = require("../shared/paths.cjs");
 const { errorMessage, telegramCall, telegramFormattedCall } = require("../telegram/api.cjs");
 const {
@@ -48,12 +52,7 @@ async function sendNotification(state, client, message) {
           text: html,
           parse_mode: "HTML",
           link_preview_options: { is_disabled: !state.secret.linkPreview },
-          ...(last ? {
-            reply_markup: {
-              force_reply: true,
-              input_field_placeholder: "Reply to Pi...",
-            },
-          } : {}),
+          ...(last ? { reply_markup: dashboardKeyboard(topic) } : {}),
         }, plain);
       }
       return { result, topic };
@@ -90,6 +89,10 @@ function handleStreamRequest(state, client, message) {
         const tail = sourceChunks[sourceChunks.length - 1] || "";
         const preview = sourceChunks.length > 1 ? `…${tail}` : tail;
         const html = renderTelegramHtml(preview);
+        sendTopicChatAction(state, topic).catch(() => {});
+        if (topic.dashboardStatus?.phase !== "Working") {
+          syncTopicDashboard(state, topic, { phase: "Working", detail: preview.split("\n")[0] }).then(() => queuePersist(state)).catch(() => {});
+        }
         await telegramFormattedCall(state.secret, "sendMessageDraft", {
           chat_id: state.secret.chatId,
           message_thread_id: topic.threadId,
@@ -99,17 +102,20 @@ function handleStreamRequest(state, client, message) {
         }, preview);
         return;
       }
-      if (message.type === "streamFinal" && text.trim()) {
-        const chunks = renderTelegramChunkPairs(text);
-        for (const chunk of chunks) {
-          await telegramFormattedCall(state.secret, "sendMessage", {
-            chat_id: state.secret.chatId,
-            message_thread_id: topic.threadId,
-            text: chunk.html,
-            parse_mode: "HTML",
-            link_preview_options: { is_disabled: !state.secret.linkPreview },
-          }, chunk.source);
+      if (message.type === "streamFinal") {
+        if (text.trim()) {
+          const chunks = renderTelegramChunkPairs(text);
+          for (const chunk of chunks) {
+            await telegramFormattedCall(state.secret, "sendMessage", {
+              chat_id: state.secret.chatId,
+              message_thread_id: topic.threadId,
+              text: chunk.html,
+              parse_mode: "HTML",
+              link_preview_options: { is_disabled: !state.secret.linkPreview },
+            }, chunk.source);
+          }
         }
+        syncTopicDashboard(state, topic, { phase: "Ready", detail: "Waiting for input" }).then(() => queuePersist(state)).catch(() => {});
       }
     },
   ));
@@ -139,6 +145,14 @@ function schedulePendingRetry(state, pending) {
   pending.retryTimer.unref?.();
 }
 
+function trackTask(state, promise) {
+  const task = Promise.resolve(promise);
+  state.activeTasks.add(task);
+  const cleanup = () => state.activeTasks.delete(task);
+  task.then(cleanup, cleanup);
+  return task;
+}
+
 function handleBrokerRequest(state, client, message) {
   if (!message || message.auth !== state.secret.bridgeSecret) {
     client.socket.destroy(new Error("Telegram bridge authentication failed"));
@@ -159,10 +173,19 @@ function handleBrokerRequest(state, client, message) {
     const commandsChanged = JSON.stringify(previousCommands || []) !== JSON.stringify(client.commands);
     state.sessionCommands.set(client.sessionId, client.commands);
     const topic = state.topics.get(client.sessionId);
-    if (topic && commandsChanged) {
-      topic.commands = client.commands;
-      queuePersist(state).catch(() => {});
-      syncTelegramCommandMenu(state).catch((error) => console.warn(`[pi-notify-telegram] Cannot sync bot commands: ${errorMessage(error)}`));
+    if (topic) {
+      const topicChanged = topic.cwd !== client.cwd || topic.sessionName !== client.sessionName;
+      if (topicChanged) {
+        topic.cwd = client.cwd;
+        topic.sessionName = client.sessionName;
+      }
+      if (commandsChanged) {
+        topic.commands = client.commands;
+        syncTelegramCommandMenu(state).catch((error) => console.warn(`[pi-notify-telegram] Cannot sync bot commands: ${errorMessage(error)}`));
+      }
+      if (topicChanged || commandsChanged) queuePersist(state).catch(() => {});
+      syncTopicDashboard(state, topic, { phase: "Connected", detail: client.sessionName || "Pi session connected" })
+        .then(() => queuePersist(state)).catch(() => {});
     }
     client.registered = true;
     if (!client.wakeChild && state.wakeReservations.has(client.sessionId)) {
@@ -177,8 +200,27 @@ function handleBrokerRequest(state, client, message) {
     state.clients.set(client.clientId, client);
     state.clientsBySession.set(client.sessionId, client);
     sendLine(client.socket, { type: "registered", version: PROTOCOL_VERSION });
+    for (const question of state.pendingQuestions.values()) {
+      if (question.clientId === client.clientId && question.sessionId === client.sessionId && typeof question.answer === "string") {
+        sendLine(client.socket, {
+          type: "result",
+          requestId: question.requestId,
+          questionId: question.questionId,
+          ok: true,
+          answer: question.answer,
+        });
+      }
+    }
     if (client.wakeChild) deliverPendingForSession(state, client.sessionId);
     else releaseWakeFollowups(state, client.sessionId);
+    return;
+  }
+  if (message.type === "questionAck" && client.registered && typeof message.questionId === "string") {
+    const question = state.pendingQuestions.get(message.questionId);
+    if (question?.sessionId === client.sessionId && question.clientId === client.clientId) {
+      state.pendingQuestions.delete(message.questionId);
+      queuePersist(state).catch((error) => console.warn(`[pi-notify-telegram] Cannot persist question ACK: ${errorMessage(error)}`));
+    }
     return;
   }
   if (message.type === "replyAck" && client.registered && typeof message.deliveryId === "string") {
@@ -202,14 +244,14 @@ function handleBrokerRequest(state, client, message) {
     return;
   }
   if (message.type === "streamDraft") {
-    handleStreamRequest(state, client, message).catch((error) => {
+    trackTask(state, handleStreamRequest(state, client, message)).catch((error) => {
       console.warn(`[pi-notify-telegram] Draft stream failed: ${errorMessage(error)}`);
     });
     return;
   }
   if (message.type === "streamFinal") {
     if (typeof message.requestId !== "string") return;
-    handleStreamRequest(state, client, message).then(() => {
+    trackTask(state, handleStreamRequest(state, client, message)).then(() => {
       if (client.wakeChild) releaseWakeFollowups(state, client.sessionId);
       sendLine(client.socket, { type: "result", requestId: message.requestId, ok: true });
     }).catch((error) => {
@@ -217,9 +259,60 @@ function handleBrokerRequest(state, client, message) {
     });
     return;
   }
+  if (message.type === "question" && client.registered && typeof message.requestId === "string") {
+    const options = Array.isArray(message.options) ? message.options.map(String).filter(Boolean).slice(0, 10) : [];
+    if (options.length === 0) {
+      sendLine(client.socket, { type: "result", requestId: message.requestId, ok: false, error: "Question has no selectable options" });
+      return;
+    }
+    const questionId = randomUUID();
+    trackTask(state, withTopicRetry(state, client.sessionId, client.cwd, client.sessionName, async (topic) => {
+      const sent = await telegramCall(state.secret, "sendMessage", {
+        chat_id: state.secret.chatId,
+        message_thread_id: topic.threadId,
+        text: String(message.question || "Pi needs your input").slice(0, 3000),
+        reply_markup: questionKeyboard(questionId, options),
+      });
+      state.pendingQuestions.set(questionId, {
+        questionId,
+        requestId: message.requestId,
+        clientId: client.clientId,
+        sessionId: client.sessionId,
+        threadId: topic.threadId,
+        messageId: sent.message_id,
+        question: String(message.question || "Pi needs your input").slice(0, 3000),
+        options,
+        createdAt: Date.now(),
+      });
+      while (state.pendingQuestions.size > 100) state.pendingQuestions.delete(state.pendingQuestions.keys().next().value);
+      await queuePersist(state);
+      syncTopicDashboard(state, topic, { phase: "Waiting for answer", detail: String(message.question || "Pi needs your input") })
+        .then(() => queuePersist(state)).catch(() => {});
+      return sent;
+    })).catch((error) => {
+      sendLine(client.socket, { type: "result", requestId: message.requestId, ok: false, error: errorMessage(error) });
+    });
+    return;
+  }
+  if (message.type === "artifact" && client.registered && typeof message.requestId === "string") {
+    const topic = state.topics.get(client.sessionId);
+    if (!topic) {
+      sendLine(client.socket, { type: "result", requestId: message.requestId, ok: false, error: "No Telegram topic exists for this session" });
+      return;
+    }
+    sendTopicChatAction(state, topic, "upload_document").catch(() => {});
+    syncTopicDashboard(state, topic, { phase: "Uploading artifact", detail: String(message.path || "") }).catch(() => {});
+    trackTask(state, sendSessionArtifact(state.secret, { ...topic, cwd: client.cwd }, String(message.path || ""), String(message.caption || ""))).then((sent) => {
+      syncTopicDashboard(state, topic, { phase: "Ready", detail: "Artifact sent" }).then(() => queuePersist(state)).catch(() => {});
+      sendLine(client.socket, { type: "result", requestId: message.requestId, ok: true, messageId: sent.message_id });
+    }).catch((error) => {
+      sendLine(client.socket, { type: "result", requestId: message.requestId, ok: false, error: errorMessage(error) });
+    });
+    return;
+  }
   if (message.type !== "notify" || !client.registered || typeof message.requestId !== "string") return;
 
-  sendNotification(state, client, message).then((sent) => {
+  trackTask(state, sendNotification(state, client, message)).then((sent) => {
     sendLine(client.socket, { type: "result", requestId: message.requestId, ok: true, messageId: sent.message_id });
   }).catch((error) => {
     sendLine(client.socket, { type: "result", requestId: message.requestId, ok: false, error: errorMessage(error) });
@@ -238,14 +331,27 @@ function closeLeader(state) {
   for (const socket of sockets) socket.destroy();
   state.clients.clear();
   state.clientsBySession.clear();
-  state.closePromise = new Promise((resolve, reject) => {
-    if (!state.server.listening) {
-      resolve();
-      return;
+  state.closePromise = (async () => {
+    await state.pollTask?.catch(() => {});
+    for (;;) {
+      const work = [
+        ...(state.activeTasks || []),
+        ...(state.streamQueues?.values?.() || []),
+        ...(state.dashboardQueues?.values?.() || []),
+      ];
+      if (work.length === 0) break;
+      await Promise.allSettled(work);
     }
-    state.server.close((error) => error ? reject(error) : resolve());
-    state.server.closeAllConnections?.();
-  });
+    await Promise.resolve(state.persistQueue).catch(() => {});
+    await new Promise((resolve, reject) => {
+      if (!state.server.listening) {
+        resolve();
+        return;
+      }
+      state.server.close((error) => error ? reject(error) : resolve());
+      state.server.closeAllConnections?.();
+    });
+  })();
   return state.closePromise;
 }
 
@@ -279,11 +385,15 @@ async function startLocalLeader(secret) {
     offset: stored.offset,
     mappings: new Map(stored.mappings.map((item) => [item.messageId, item])),
     pendingReplies: new Map(stored.pendingReplies.map((item) => [item.deliveryId, item])),
+    pendingQuestions: new Map(stored.pendingQuestions.map((item) => [item.questionId, item])),
     topics: new Map(stored.topics.map((item) => [item.sessionId, item])),
     sessionCommands: new Map(stored.topics.map((item) => [item.sessionId, Array.isArray(item.commands) ? item.commands : []])),
     commandMenuSignature: undefined,
     topicPromises: new Map(),
     streamQueues: new Map(),
+    dashboardQueues: new Map(),
+    chatActionSentAt: new Map(),
+    activeTasks: new Set(),
     clients: new Map(),
     clientsBySession: new Map(),
     wakeReservations: new Set(),
@@ -324,6 +434,10 @@ async function startLocalLeader(secret) {
   state.cleanupTimer.unref?.();
 
   server.on("connection", (socket) => {
+    if (state.closed) {
+      socket.destroy();
+      return;
+    }
     socket.setNoDelay(true);
     const client = { socket, registered: false };
     attachLineReader(socket, (message) => handleBrokerRequest(state, client, message), () => socket.destroy());
@@ -331,7 +445,10 @@ async function startLocalLeader(secret) {
       if (client.clientId && state.clients.get(client.clientId) === client) state.clients.delete(client.clientId);
       if (client.sessionId && state.clientsBySession.get(client.sessionId) === client) {
         state.clientsBySession.delete(client.sessionId);
-        if (!state.topics.has(client.sessionId)) state.sessionCommands.delete(client.sessionId);
+        const topic = state.topics.get(client.sessionId);
+        if (!topic) state.sessionCommands.delete(client.sessionId);
+        else if (!state.closed) syncTopicDashboard(state, topic, { phase: "Disconnected", detail: "Pi session is not connected" })
+          .then(() => queuePersist(state)).catch(() => {});
       }
     });
     socket.on("error", () => {});
@@ -344,7 +461,7 @@ async function startLocalLeader(secret) {
   });
   server.unref?.();
   syncTelegramCommandMenu(state).catch((error) => console.warn(`[pi-notify-telegram] Cannot sync bot commands: ${errorMessage(error)}`));
-  pollTelegram(state).catch((error) => console.warn(`[pi-notify-telegram] Poller stopped: ${errorMessage(error)}`));
+  state.pollTask = pollTelegram(state).catch((error) => console.warn(`[pi-notify-telegram] Poller stopped: ${errorMessage(error)}`));
   return state;
 }
 

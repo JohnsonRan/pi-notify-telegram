@@ -35,6 +35,27 @@ async function telegramCall(secret, method, payload, timeoutMs = 20_000, externa
   throw new Error(`Telegram ${method} failed after retry`);
 }
 
+async function telegramMultipartCall(secret, method, form, timeoutMs = 60_000) {
+  let response;
+  try {
+    response = await fetch(`https://api.telegram.org/bot${secret.botToken}/${method}`, {
+      method: "POST",
+      body: form,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    throw new Error(`Telegram ${method} failed: ${errorMessage(error)}`);
+  }
+  let result;
+  try {
+    result = await response.json();
+  } catch {
+    throw new Error(`Telegram ${method} returned invalid JSON (HTTP ${response.status})`);
+  }
+  if (response.ok && result?.ok === true) return result.result;
+  throw new Error(`Telegram ${method} failed: ${result?.description || `HTTP ${response.status}`}`);
+}
+
 async function telegramFormattedCall(secret, method, payload, plainText) {
   try {
     return await telegramCall(secret, method, payload);
@@ -46,4 +67,4 @@ async function telegramFormattedCall(secret, method, payload, plainText) {
   }
 }
 
-module.exports = Object.freeze({ errorMessage, telegramCall, telegramFormattedCall });
+module.exports = Object.freeze({ errorMessage, telegramCall, telegramFormattedCall, telegramMultipartCall });

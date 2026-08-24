@@ -154,6 +154,15 @@ The `/help`, `/status`, and `/sessions` responses include inline buttons for swi
 
 Messages in an existing session topic wake that exact session. Ordinary unthreaded text never falls back to a globally "latest" session.
 
+## Rich Telegram interaction
+
+- Send a document or photo inside a session topic to save it under `<cwd>/.pi-telegram/inbox/` and ask that exact Pi session to inspect it. Downloads are limited to 20 MiB and sanitized filenames never escape the session directory.
+- Pi can call `telegram_send_file` to return a generated document, report, archive, or image from its working directory. Uploads are limited to 50 MiB and paths outside the session directory are rejected.
+- Every session topic gets one pinned status dashboard that is edited in place with connection, working, question, upload, and ready states.
+- Dashboard and notification buttons provide Continue, Stop, Retry, and Refresh status actions. Stop calls Pi's abort API directly instead of injecting a textual command.
+- Pi can call `telegram_ask_user_question` to render multiple-choice Telegram buttons and wait for the selected answer in the same tool call. Regular local `ask_user_question` prompts still produce a notification but remain local to Pi's terminal UI.
+- Telegram chat actions show typing and document-upload activity while Pi is working.
+
 ## Pi command menu
 
 For each connected session, the extension reads `pi.getCommands()` and synchronizes invokable extension commands, prompt templates, and skills into Telegram with `setMyCommands`. Names that Telegram cannot represent directly are converted to stable lowercase aliases, for example `/ctx-stats` becomes `/ctx_stats` and `/skill:frontend-design` becomes `/skill_frontend_design`.

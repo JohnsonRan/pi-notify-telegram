@@ -4,6 +4,9 @@ const { sendLine } = require("../bridge/protocol.cjs");
 const { MAX_PENDING_REPLIES, MAX_TOPICS, pruneExpiredBrokerState, queuePersist } = require("../broker/state.cjs");
 const { CONTROL_COMMANDS, CONTROL_PANEL_COMMANDS, RESTORE_CONTEXT_PROMPT, controlPanel, parseControlCallback, parseRestoreCallback, topicName, translateTelegramCommand } = require("./control.cjs");
 const { splitMarkdown } = require("./format.cjs");
+const { attachmentFromMessage, downloadTelegramAttachment } = require("./files.cjs");
+const { parseSessionAction, sendTopicChatAction, syncTopicDashboard } = require("./dashboard.cjs");
+const { parseQuestionCallback } = require("./questions.cjs");
 const { cloneRepository, parseGitCloneCommand } = require("./git-clone.cjs");
 const { parsePiUpdateCommand, runPiUpdate } = require("./pi-update.cjs");
 const { errorMessage, telegramCall } = require("./api.cjs");
@@ -35,6 +38,8 @@ async function ensureTopic(state, sessionId, cwd, sessionName) {
     };
     state.topics.set(sessionId, topic);
     await queuePersist(state);
+    syncTopicDashboard(state, topic, { phase: "Waiting", detail: "Session topic created" })
+      .then(() => queuePersist(state)).catch(() => {});
     syncTelegramCommandMenu(state).catch((error) => console.warn(`[pi-notify-telegram] Cannot sync bot commands: ${errorMessage(error)}`));
     return topic;
   })().finally(() => state.topicPromises.delete(sessionId));
@@ -102,6 +107,13 @@ function deliverPendingForSession(state, sessionId) {
   for (const pending of state.pendingReplies.values()) {
     if (pending.sessionId === sessionId && !pending.holdForWake) deliverPendingReply(state, pending);
   }
+}
+
+function sendSessionControl(state, sessionId, action) {
+  const client = connectedTarget(state, sessionId);
+  if (!client) return false;
+  sendLine(client.socket, { type: "control", sessionId, action });
+  return true;
 }
 
 async function syncTelegramCommandMenu(state) {
@@ -303,8 +315,11 @@ async function handleControlMessage(state, message) {
 }
 
 async function queueTelegramReply(state, target, message, holdForWake = false) {
+  const deliveryId = typeof message.deliveryId === "string" ? message.deliveryId : randomUUID();
+  const existing = state.pendingReplies.get(deliveryId);
+  if (existing) return { pending: existing, delivered: holdForWake ? false : deliverPendingReply(state, existing) };
   const pending = {
-    deliveryId: randomUUID(),
+    deliveryId,
     text: message.text,
     telegramMessageId: message.message_id,
     notificationMessageId: target.messageId,
@@ -329,12 +344,47 @@ function releaseWakeFollowups(state, sessionId) {
 }
 
 async function handleTelegramMessage(state, message) {
-  if (!message || typeof message.text !== "string") return;
+  if (!message) return;
   if (message.chat?.id !== state.secret.chatId || message.from?.id !== state.secret.allowedUserId) return;
-  if (message.from?.is_bot === true || message.text.trim().startsWith("/start")) return;
+  if (message.from?.is_bot === true) return;
 
-  const threadIsKnown = Number.isSafeInteger(message.message_thread_id) &&
-    [...state.topics.values()].some((topic) => topic.threadId === message.message_thread_id);
+  const topicForThread = Number.isSafeInteger(message.message_thread_id)
+    ? [...state.topics.values()].find((topic) => topic.threadId === message.message_thread_id)
+    : undefined;
+  const threadIsKnown = Boolean(topicForThread);
+  const attachment = attachmentFromMessage(message);
+  if (attachment) {
+    if (!topicForThread) {
+      await sendBrokerText(state, "Send files inside a Pi session topic so they can be saved to that session.", {
+        replyTo: message.message_id,
+        ...(Number.isSafeInteger(message.message_thread_id) ? { threadId: message.message_thread_id } : {}),
+      }).catch(() => {});
+      return;
+    }
+    try {
+      const downloaded = await downloadTelegramAttachment(state.secret, message, topicForThread);
+      const caption = String(message.caption || "").trim();
+      sendTopicChatAction(state, topicForThread).catch(() => {});
+      message = {
+        ...message,
+        text: [
+          `Telegram attachment saved to ${downloaded.relativePath}.`,
+          `MIME type: ${downloaded.mimeType}.`,
+          ...(caption ? [`User caption: ${caption}`] : []),
+          "Inspect this file and respond to the user.",
+        ].join("\n"),
+      };
+    } catch (error) {
+      await sendBrokerText(state, `Could not save attachment: ${errorMessage(error)}`, {
+        threadId: message.message_thread_id,
+        replyTo: message.message_id,
+      }).catch(() => {});
+      return;
+    }
+  }
+
+  if (typeof message.text !== "string") return;
+  if (message.text.trim().startsWith("/start")) return;
   if (state.secret.wakeMode && !threadIsKnown) {
     try {
       await handleControlMessage(state, message);
@@ -454,18 +504,94 @@ async function handleCallbackQuery(state, query, options = {}) {
   if (!query || typeof query.id !== "string") return;
   const authorized = query.message?.chat?.id === state.secret.chatId && query.from?.id === state.secret.allowedUserId;
   const command = authorized ? parseControlCallback(query.data) : undefined;
+  const questionAction = authorized ? parseQuestionCallback(query.data) : undefined;
+  const pendingQuestion = questionAction ? state.pendingQuestions?.get(questionAction.questionId) : undefined;
+  const selectedAnswer = pendingQuestion?.options?.[questionAction?.optionIndex];
+  const sessionAction = authorized ? parseSessionAction(query.data) : undefined;
+  const actionTopic = sessionAction ? state.topics.get(sessionAction.sessionId) : undefined;
   const restoreSessionId = authorized ? parseRestoreCallback(query.data) : undefined;
   const restoreTopic = restoreSessionId ? state.topics.get(restoreSessionId) : undefined;
-  await telegramCall(state.secret, "answerCallbackQuery", {
-    callback_query_id: query.id,
-    ...(!authorized ? { text: "Not allowed.", show_alert: true } : {}),
-    ...(authorized && !command && !restoreTopic ? { text: "This button is no longer available." } : {}),
-    ...(restoreTopic ? {
-      text: "Telegram cannot open topics automatically. Open the unread topic to see the restored context recap.",
-      show_alert: true,
-    } : {}),
-  }).catch((error) => console.warn(`[pi-notify-telegram] Cannot answer callback: ${errorMessage(error)}`));
+  if (!selectedAnswer) {
+    await telegramCall(state.secret, "answerCallbackQuery", {
+      callback_query_id: query.id,
+      ...(!authorized ? { text: "Not allowed.", show_alert: true } : {}),
+      ...(authorized && !command && !restoreTopic && !actionTopic ? { text: "This button is no longer available." } : {}),
+      ...(restoreTopic ? {
+        text: "Telegram cannot open topics automatically. Open the unread topic to see the restored context recap.",
+        show_alert: true,
+      } : {}),
+    }).catch((error) => console.warn(`[pi-notify-telegram] Cannot answer callback: ${errorMessage(error)}`));
+  }
   if (!authorized) return;
+
+  if (selectedAnswer && pendingQuestion) {
+    const deliverAnswer = options.deliverQuestionAnswer || ((_state, question, answer) => {
+      const client = state.clients?.get(question.clientId);
+      if (!client?.registered || client.sessionId !== question.sessionId || typeof question.requestId !== "string") return false;
+      sendLine(client.socket, {
+        type: "result",
+        requestId: question.requestId,
+        questionId: question.questionId,
+        ok: true,
+        answer: String(answer),
+      });
+      return true;
+    });
+    pendingQuestion.answer = String(selectedAnswer);
+    pendingQuestion.answeredAt = Date.now();
+    await (options.queuePersist || queuePersist)(state);
+    if (!deliverAnswer(state, pendingQuestion, selectedAnswer)) {
+      await telegramCall(state.secret, "answerCallbackQuery", {
+        callback_query_id: query.id,
+        text: "Pi is disconnected. This answer will be delivered if the question reconnects.",
+        show_alert: true,
+      }).catch(() => {});
+      return;
+    }
+    await telegramCall(state.secret, "answerCallbackQuery", {
+      callback_query_id: query.id,
+      text: `Selected: ${String(selectedAnswer).slice(0, 150)}`,
+    }).catch(() => {});
+    await telegramCall(state.secret, "editMessageText", {
+      chat_id: state.secret.chatId,
+      message_id: pendingQuestion.messageId,
+      text: `${pendingQuestion.question}\n\nSelected: ${selectedAnswer}`,
+      link_preview_options: { is_disabled: true },
+    }).catch(() => {});
+    const topic = state.topics.get(pendingQuestion.sessionId);
+    if (topic) await (options.syncTopicDashboard || syncTopicDashboard)(state, topic, { phase: "Answer sent", detail: String(selectedAnswer) })
+      .then(() => (options.queuePersist || queuePersist)(state)).catch(() => {});
+    return;
+  }
+
+  if (actionTopic) {
+    if (sessionAction.action === "refresh") {
+      await syncTopicDashboard(state, actionTopic, {
+        phase: connectedTarget(state, actionTopic.sessionId) ? "Connected" : "Disconnected",
+        detail: connectedTarget(state, actionTopic.sessionId) ? "Pi session connected" : "Pi session is not connected",
+      }).then(() => queuePersist(state)).catch(() => {});
+      return;
+    }
+    if (sessionAction.action === "stop") {
+      const stopped = sendSessionControl(state, actionTopic.sessionId, "stop");
+      await syncTopicDashboard(state, actionTopic, {
+        phase: stopped ? "Stop requested" : "Disconnected",
+        detail: stopped ? "Stopping the active Pi turn" : "Pi session is not connected",
+      }).then(() => queuePersist(state)).catch(() => {});
+      return;
+    }
+    const text = sessionAction.action === "continue" ? "/continue" : "Retry the last failed operation.";
+    await handleTelegramMessage(state, {
+      message_id: query.message?.message_id,
+      message_thread_id: actionTopic.threadId,
+      text,
+      chat: { id: state.secret.chatId },
+      from: { id: state.secret.allowedUserId, is_bot: false },
+    });
+    await syncTopicDashboard(state, actionTopic, { phase: "Command sent", detail: text })
+      .then(() => queuePersist(state)).catch(() => {});
+    return;
+  }
 
   if (restoreTopic) {
     try {

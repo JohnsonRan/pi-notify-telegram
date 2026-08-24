@@ -101,6 +101,7 @@ async function mergePreviousInstallation(config, state, selected, read = readFil
       offset: Math.max(state.offset, Number(previousState.offset) || 0),
       mappings: Array.isArray(previousState.mappings) ? previousState.mappings : [],
       pendingReplies: Array.isArray(previousState.pendingReplies) ? previousState.pendingReplies : [],
+      pendingQuestions: Array.isArray(previousState.pendingQuestions) ? previousState.pendingQuestions : [],
       topics: Array.isArray(previousState.topics) ? previousState.topics : [],
     };
   }
@@ -187,7 +188,7 @@ async function main() {
       wakePiCommandArgs: [],
       wakeOpenTerminal: true,
     };
-    let state = { offset, mappings: [], pendingReplies: [], topics: [] };
+    let state = { offset, mappings: [], pendingReplies: [], pendingQuestions: [], topics: [] };
     ({ config, state } = await mergePreviousInstallation(config, state, selected));
 
     await writeStagedFiles([

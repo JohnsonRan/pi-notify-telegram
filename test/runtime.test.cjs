@@ -231,6 +231,52 @@ test("answers and applies authorized Telegram control callbacks", async () => {
   assert.match(helpers.RESTORE_CONTEXT_PROMPT, /Do not modify files or run tools/);
 });
 
+test("delivers Telegram question button answers to the matching session", async () => {
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url, options) => {
+    calls.push({ method: url.split("/").pop(), body: JSON.parse(options.body) });
+    return { ok: true, status: 200, json: async () => ({ ok: true, result: true }) };
+  };
+  const questionId = "12345678-1234-1234-1234-123456789abc";
+  const sessionId = "87654321-4321-4321-4321-cba987654321";
+  const delivered = [];
+  const state = {
+    secret: { token: `123456:${"a".repeat(32)}`, botToken: `123456:${"a".repeat(32)}`, chatId: 42, allowedUserId: 42 },
+    pendingQuestions: new Map([[questionId, {
+      questionId,
+      sessionId,
+      threadId: 701,
+      messageId: 90,
+      question: "Deploy?",
+      options: ["Deploy", "Cancel"],
+    }]]),
+    topics: new Map([[sessionId, { sessionId, threadId: 701, cwd: "C:\\Work" }]]),
+  };
+  try {
+    await helpers.handleCallbackQuery(state, {
+      id: "callback-question",
+      data: `question:${questionId}:0`,
+      from: { id: 42 },
+      message: { message_id: 90, message_thread_id: 701, chat: { id: 42 } },
+    }, {
+      queuePersist: async () => {},
+      deliverQuestionAnswer: (_state, question, answer) => {
+        assert.equal(question.sessionId, sessionId);
+        delivered.push(answer);
+        return true;
+      },
+      syncTopicDashboard: async () => {},
+    });
+  } finally {
+    global.fetch = originalFetch;
+  }
+  assert.deepEqual(delivered, ["Deploy"]);
+  assert.equal(state.pendingQuestions.size, 1);
+  assert.equal(state.pendingQuestions.get(questionId).answer, "Deploy");
+  assert.deepEqual(calls.map((call) => call.method), ["answerCallbackQuery", "editMessageText"]);
+});
+
 test("restore wakes the exact session with a context recap", async () => {
   const calls = [];
   const topic = {
@@ -428,6 +474,41 @@ test("closes broker clients before stopping the leader", async () => {
   assert.equal(state.clientsBySession.size, 0);
 });
 
+test("keeps the broker port until rich interaction work and persistence drain", async () => {
+  let releaseTask;
+  let releasePersist;
+  let serverClosed = false;
+  const activeTasks = new Set();
+  const task = new Promise((resolve) => { releaseTask = resolve; });
+  activeTasks.add(task);
+  task.then(() => activeTasks.delete(task));
+  const persistQueue = new Promise((resolve) => { releasePersist = resolve; });
+  const state = {
+    closed: false,
+    pendingReplies: new Map(),
+    clients: new Map(),
+    clientsBySession: new Map(),
+    activeTasks,
+    streamQueues: new Map(),
+    dashboardQueues: new Map(),
+    persistQueue,
+    server: {
+      listening: true,
+      close(callback) { serverClosed = true; this.listening = false; callback(); },
+      closeAllConnections() {},
+    },
+  };
+  const closing = helpers.closeLeader(state);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(serverClosed, false);
+  releaseTask();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(serverClosed, false);
+  releasePersist();
+  await closing;
+  assert.equal(serverClosed, true);
+});
+
 test("stream queue cleanup does not create an unhandled rejection", async () => {
   const state = { streamQueues: new Map() };
   const failure = helpers.enqueueStream(state, "session", async () => {
@@ -530,12 +611,13 @@ global.fetch = async (url, options) => {
   }
   if (method === "sendMessage") {
     const sent = { message_id: ++nextMessage, chat: { id: 42 }, message_thread_id: body.message_thread_id };
-    if (body.reply_markup) {
+    if (body.parse_mode === "HTML" && body.reply_markup) {
       notificationByThread.set(body.message_thread_id, sent.message_id);
       notificationMessages.push(body);
     } else finalMessages.push(body);
     return response(sent);
   }
+  if (["pinChatMessage", "editMessageText", "sendChatAction"].includes(method)) return response(true);
   if (method === "getUpdates") {
     if (!updatesSent && notificationByThread.size === 2) {
       updatesSent = true;
@@ -659,7 +741,7 @@ async function emit(pi, event, payload, ctx) {
   assert.deepEqual(result.topicThreads, [701, 702]);
   assert.equal(result.mappings, 0);
   assert.equal(result.pendingReplies, 0);
-  assert.ok(result.notificationMessages.some((message) => message.parse_mode === "HTML" && message.link_preview_options?.is_disabled === true && message.text.includes("<b>Question &lt;one&gt;</b>") && message.text.includes("Reply <b>one</b>")));
+  assert.ok(result.notificationMessages.some((message) => message.parse_mode === "HTML" && message.link_preview_options?.is_disabled === true && message.text.includes("<b>Question &lt;one&gt;</b>") && message.text.includes("Reply <b>one</b>") && message.reply_markup.inline_keyboard[0][0].text === "Continue"));
   assert.ok(result.drafts.some((draft) => draft.text.includes("Main agent · Turn 1")));
   assert.ok(result.drafts.some((draft) => draft.text.includes("Subagents · 0/1 done · 1 running") && draft.text.includes("reviewer · read · src/runtime.cjs")));
   assert.ok(result.finalMessages.some((message) => message.parse_mode === "HTML" && message.link_preview_options?.is_disabled === true && message.text === "Streaming hello"));
