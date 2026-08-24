@@ -133,6 +133,9 @@ node "$HOME/.pi/agent/git/github.com/JohnsonRan/pi-notify-telegram/service.cjs" 
 All Topics is command-only:
 
 ```text
+/clone https://github.com/owner/repository.git
+/clone git@github.com:owner/repository.git local-name
+git clone https://github.com/owner/repository.git
 /new F:\\project | inspect this project
 /new F:\\project
 /new | use the configured default directory
@@ -140,6 +143,8 @@ All Topics is command-only:
 /status
 /help
 ```
+
+`/clone` and the equivalent `git clone` form clone one HTTPS or SSH repository into `wakeDefaultCwd`, create a private session topic for the repository, and start Pi with the cloned repository as its working directory. An optional destination must be a single safe directory name; absolute paths, parent traversal, shell operators, and arbitrary Git options are rejected. The configured default directory must remain inside `wakeAllowedRoots`.
 
 The `/help`, `/status`, and `/sessions` responses include inline buttons for switching between the control views and refreshing live status without typing another command. Known sessions also get `Restore + recap` buttons: pressing one verifies the saved topic, recreates it if it was deleted, resumes the exact host Pi session, and asks Pi to post a concise recap of the recovered objective, decisions, completed work, and next steps. Telegram does not provide a Bot API method or supported private-topic deep link that can force the client to navigate into an existing topic, so the restored topic is marked unread and the callback tells the user to open it. Callback actions are restricted to the configured chat and allowed user.
 

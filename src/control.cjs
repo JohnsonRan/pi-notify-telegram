@@ -4,6 +4,7 @@ const { formatLocalTimestamp } = require("./time.cjs");
 const { version: PACKAGE_VERSION } = require("../package.json");
 
 const CONTROL_COMMANDS = Object.freeze([
+  { command: "clone", description: "Clone a Git repository and run Pi" },
   { command: "new", description: "Create a new Pi session" },
   { command: "sessions", description: "List known Pi sessions" },
   { command: "status", description: "Show the Pi wake broker status" },
@@ -83,6 +84,8 @@ function controlPanel(state, command, now = Date.now()) {
   return {
     text: [
       "Pi Telegram wake commands:",
+      "/clone <repository-url> [directory] — clone into wakeDefaultCwd and run Pi",
+      "git clone <repository-url> [directory] — same as /clone",
       "/new <cwd> | <prompt> — create and run a session",
       "/new <cwd> — create a session topic without running it",
       "/new | <prompt> — use wakeDefaultCwd",

@@ -4,6 +4,7 @@ const { sendLine } = require("./bridge-protocol.cjs");
 const { MAX_PENDING_REPLIES, MAX_TOPICS, pruneExpiredBrokerState, queuePersist } = require("./broker-state.cjs");
 const { CONTROL_COMMANDS, CONTROL_PANEL_COMMANDS, RESTORE_CONTEXT_PROMPT, controlPanel, parseControlCallback, parseRestoreCallback, topicName, translateTelegramCommand } = require("./control.cjs");
 const { splitMarkdown } = require("./format.cjs");
+const { cloneRepository, parseGitCloneCommand } = require("./git-clone.cjs");
 const { errorMessage, telegramCall } = require("./telegram-api.cjs");
 const { parseControlCommand, resolveWakeCwd } = require("./wake.cjs");
 
@@ -244,13 +245,31 @@ async function launchWakeSession(state, topic, prompt, replyTo) {
 }
 
 async function handleControlMessage(state, message) {
+  const cloneCommand = parseGitCloneCommand(message.text);
   const parsed = parseControlCommand(message.text);
   const replyOptions = {
     replyTo: message.message_id,
     ...(Number.isSafeInteger(message.message_thread_id) ? { threadId: message.message_thread_id } : {}),
   };
+  if (cloneCommand) {
+    await sendBrokerText(state, "Cloning repository into wakeDefaultCwd…", replyOptions);
+    const cloned = await (state.cloneRepository || cloneRepository)({
+      ...cloneCommand,
+      defaultCwd: state.secret.wakeDefaultCwd,
+      allowedRoots: state.secret.wakeAllowedRoots,
+    });
+    const sessionId = randomUUID();
+    const topic = await ensureTopic(state, sessionId, cloned.cwd, cloned.directory);
+    await sendBrokerText(state, [
+      `Repository cloned: ${cloned.directory}`,
+      `Working directory: ${cloned.cwd}`,
+      `Pi session: ${sessionId.slice(0, 8)}`,
+    ].join("\n"), { threadId: topic.threadId });
+    await launchWakeSession(state, topic, "");
+    return;
+  }
   if (!parsed) {
-    await sendBrokerText(state, "Use /new, /sessions, /status, or /help in All Topics.", replyOptions);
+    await sendBrokerText(state, "Use /clone, /new, /sessions, /status, or /help in All Topics.", replyOptions);
     return;
   }
   if (CONTROL_PANEL_COMMANDS.has(parsed.command)) {

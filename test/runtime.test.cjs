@@ -126,6 +126,7 @@ test("builds Telegram control panels with inline buttons", () => {
   assert.deepEqual(status.replyMarkup.inline_keyboard[0].map((item) => item.callback_data), ["control:status", "control:sessions"]);
   const sessions = helpers.controlPanel(state, "sessions");
   assert.match(sessions.text, /Demo · session-/);
+  assert.match(helpers.controlPanel(state, "help").text, /\/clone <repository-url>/);
   assert.equal(sessions.replyMarkup.inline_keyboard[0][0].callback_data, "restore:session-id");
   assert.equal(helpers.parseControlCallback("control:help"), "help");
   assert.equal(helpers.parseControlCallback("control:unknown"), undefined);
