@@ -6,8 +6,8 @@ const path = require("node:path");
 const { PassThrough } = require("node:stream");
 const test = require("node:test");
 
-const { waitForEnterAfterError } = require("../src/terminal-host.cjs");
-const { createTerminalLaunch, shellQuote } = require("../src/terminal.cjs");
+const { waitForEnterAfterError } = require("../src/wake/terminal-host.cjs");
+const { createTerminalLaunch, shellQuote } = require("../src/wake/terminal.cjs");
 
 test("builds a Windows console launch around the terminal host", () => {
   const launch = createTerminalLaunch("C:\\Temp\\wake.json", {
@@ -83,7 +83,7 @@ test("terminal host runs Pi with the stored cwd and environment", () => {
     env: { WAKE_TEST_VALUE: "inherited" },
   }));
   try {
-    const child = spawnSync(process.execPath, [path.resolve(__dirname, "../src/terminal-host.cjs"), specPath], {
+    const child = spawnSync(process.execPath, [path.resolve(__dirname, "../src/wake/terminal-host.cjs"), specPath], {
       encoding: "utf8",
       timeout: 30_000,
     });
@@ -114,7 +114,7 @@ test("terminal host exits quietly when fallback cancels before Pi starts", () =>
   }));
   writeFileSync(`${specPath}.cancel`, "cancel\n");
   try {
-    const child = spawnSync(process.execPath, [path.resolve(__dirname, "../src/terminal-host.cjs"), specPath], {
+    const child = spawnSync(process.execPath, [path.resolve(__dirname, "../src/wake/terminal-host.cjs"), specPath], {
       encoding: "utf8",
       timeout: 30_000,
     });

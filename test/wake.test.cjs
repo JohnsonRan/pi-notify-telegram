@@ -5,8 +5,8 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { WakeLauncher, appendBoundedText, parseControlCommand, resolveWakeCwd } = require("../src/wake.cjs");
-const { decodeWakePayload, wakePromptArgument, WAKE_SENTINEL } = require("../src/wake-payload.cjs");
+const { WakeLauncher, appendBoundedText, parseControlCommand, resolveWakeCwd } = require("../src/wake/launcher.cjs");
+const { decodeWakePayload, wakePromptArgument, WAKE_SENTINEL } = require("../src/wake/payload.cjs");
 
 test("parses General-topic wake commands", () => {
   assert.deepEqual(parseControlCommand("/new F:\\Work | inspect this"), {

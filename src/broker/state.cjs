@@ -1,6 +1,6 @@
 const { randomUUID } = require("node:crypto");
 const { readFile, rename, unlink, writeFile } = require("node:fs/promises");
-const { STATE_PATH } = require("./paths.cjs");
+const { STATE_PATH } = require("../shared/paths.cjs");
 
 const MAX_MAPPINGS = 200;
 const MAX_PENDING_REPLIES = 1000;

@@ -1,13 +1,13 @@
 const { randomUUID } = require("node:crypto");
 const path = require("node:path");
-const { sendLine } = require("./bridge-protocol.cjs");
-const { MAX_PENDING_REPLIES, MAX_TOPICS, pruneExpiredBrokerState, queuePersist } = require("./broker-state.cjs");
+const { sendLine } = require("../bridge/protocol.cjs");
+const { MAX_PENDING_REPLIES, MAX_TOPICS, pruneExpiredBrokerState, queuePersist } = require("../broker/state.cjs");
 const { CONTROL_COMMANDS, CONTROL_PANEL_COMMANDS, RESTORE_CONTEXT_PROMPT, controlPanel, parseControlCallback, parseRestoreCallback, topicName, translateTelegramCommand } = require("./control.cjs");
 const { splitMarkdown } = require("./format.cjs");
 const { cloneRepository, parseGitCloneCommand } = require("./git-clone.cjs");
 const { parsePiUpdateCommand, runPiUpdate } = require("./pi-update.cjs");
-const { errorMessage, telegramCall } = require("./telegram-api.cjs");
-const { parseControlCommand, resolveWakeCwd } = require("./wake.cjs");
+const { errorMessage, telegramCall } = require("./api.cjs");
+const { parseControlCommand, resolveWakeCwd } = require("../wake/launcher.cjs");
 
 const WAKE_REGISTRATION_TIMEOUT_MS = 15_000;
 const WAKE_STOP_TIMEOUT_MS = 5_000;

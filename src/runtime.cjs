@@ -7,11 +7,11 @@
  * while each connected Pi process injects replies with pi.sendUserMessage().
  */
 
-const { clientStateFor, initializeState, requestNotification } = require("./bridge-client.cjs");
-const { closeLeader, startLocalLeader } = require("./broker-server.cjs");
-const { readSettings: readSecret } = require("./settings.cjs");
-const { attach } = require("./streaming.cjs");
-const { errorMessage } = require("./telegram-api.cjs");
+const { clientStateFor, initializeState, requestNotification } = require("./bridge/client.cjs");
+const { closeLeader, startLocalLeader } = require("./broker/server.cjs");
+const { readSettings: readSecret } = require("./shared/settings.cjs");
+const { attach } = require("./session/streaming.cjs");
+const { errorMessage } = require("./telegram/api.cjs");
 
 async function notify(pi, ctx, notification, title, body) {
   if (!pi || typeof pi.on !== "function" || typeof pi.sendUserMessage !== "function") {

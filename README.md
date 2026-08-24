@@ -217,13 +217,15 @@ npm run check
 
 GitHub Actions runs the same check on Windows, macOS, and Linux. The Windows job also executes the hidden VBS daemon launcher and verifies that it waits for the child process and preserves its exit code.
 
-The runtime is split by responsibility:
+The runtime is organized by responsibility:
 
-- `runtime.cjs` is the public composition facade.
-- `bridge-client.cjs` and `bridge-protocol.cjs` own Pi-side broker communication.
-- `broker-server.cjs`, `broker-state.cjs`, and `telegram-router.cjs` own the local leader, durable routing state, and Telegram updates.
-- `settings.cjs`, `telegram-api.cjs`, and `control.cjs` provide shared configuration, HTTP, and control-panel logic.
-- `streaming.cjs` and `live-status.cjs` handle assistant drafts and live agent status.
+- `src/runtime.cjs` is the public composition facade.
+- `src/bridge/` owns Pi-side broker communication and framing.
+- `src/broker/` owns the local leader, connected clients, and durable routing state.
+- `src/telegram/` owns Telegram HTTP, routing, formatting, controls, cloning, and updates.
+- `src/session/` owns assistant streaming and live agent status.
+- `src/wake/` owns wake processes, terminal launch, and wake payloads.
+- `src/shared/` and `src/service/` contain shared settings, paths, time formatting, and daemon logging.
 
 ## License
 

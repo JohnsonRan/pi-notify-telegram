@@ -4,8 +4,8 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { daemonLogPath, installDaemonLogging } = require("../src/daemon-log.cjs");
-const { formatLocalTimestamp } = require("../src/time.cjs");
+const { daemonLogPath, installDaemonLogging } = require("../src/service/daemon-log.cjs");
+const { formatLocalTimestamp } = require("../src/shared/time.cjs");
 
 test("writes bounded daemon diagnostics", () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "pi-telegram-log-test-"));

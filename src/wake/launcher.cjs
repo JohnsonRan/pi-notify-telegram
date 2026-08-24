@@ -5,7 +5,7 @@ const { mkdir, readdir, realpath, stat, unlink, writeFile } = require("node:fs/p
 const os = require("node:os");
 const path = require("node:path");
 const { createTerminalLaunch } = require("./terminal.cjs");
-const { wakePromptArgument } = require("./wake-payload.cjs");
+const { wakePromptArgument } = require("./payload.cjs");
 
 const MAX_STDERR_BYTES = 8 * 1024;
 const TERMINAL_HOST_PATH = path.join(__dirname, "terminal-host.cjs");

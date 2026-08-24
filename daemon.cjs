@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 const path = require("node:path");
-const { daemonLogPath, installDaemonLogging } = require("./src/daemon-log.cjs");
+const { daemonLogPath, installDaemonLogging } = require("./src/service/daemon-log.cjs");
 
 process.env.PI_TELEGRAM_DAEMON = "1";
 

@@ -5,8 +5,8 @@ const { readFile, rename, unlink, writeFile } = require("node:fs/promises");
 const net = require("node:net");
 const readline = require("node:readline/promises");
 const { stdin, stdout } = require("node:process");
-const { CONFIG_PATH, DEFAULT_PORT, SECRET_PATH, STATE_PATH } = require("./src/paths.cjs");
-const { preserveOperationalConfig } = require("./src/settings.cjs");
+const { CONFIG_PATH, DEFAULT_PORT, SECRET_PATH, STATE_PATH } = require("./src/shared/paths.cjs");
+const { preserveOperationalConfig } = require("./src/shared/settings.cjs");
 
 async function brokerIsRunning() {
   let port;

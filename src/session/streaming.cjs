@@ -1,8 +1,8 @@
 const { randomInt } = require("node:crypto");
-const { connectClient, getClientState, initializeState, requestBroker } = require("./bridge-client.cjs");
-const { sendLine } = require("./bridge-protocol.cjs");
+const { connectClient, getClientState, initializeState, requestBroker } = require("../bridge/client.cjs");
+const { sendLine } = require("../bridge/protocol.cjs");
 const { assistantText, formatLiveStatus } = require("./live-status.cjs");
-const { errorMessage } = require("./telegram-api.cjs");
+const { errorMessage } = require("../telegram/api.cjs");
 
 const STREAM_THROTTLE_MS = 1_200;
 const STATUS_HEARTBEAT_MS = 5_000;

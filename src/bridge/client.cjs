@@ -2,11 +2,11 @@ const { spawn } = require("node:child_process");
 const { randomUUID } = require("node:crypto");
 const net = require("node:net");
 const path = require("node:path");
-const { PROTOCOL_VERSION, attachLineReader, sendLine } = require("./bridge-protocol.cjs");
-const { startLocalLeader } = require("./broker-server.cjs");
-const { WINDOWS_DAEMON_MARKER } = require("./paths.cjs");
-const { readSettings: readSecret } = require("./settings.cjs");
-const { errorMessage } = require("./telegram-api.cjs");
+const { PROTOCOL_VERSION, attachLineReader, sendLine } = require("./protocol.cjs");
+const { startLocalLeader } = require("../broker/server.cjs");
+const { WINDOWS_DAEMON_MARKER } = require("../shared/paths.cjs");
+const { readSettings: readSecret } = require("../shared/settings.cjs");
+const { errorMessage } = require("../telegram/api.cjs");
 
 const DAEMON_PATH = path.join(__dirname, "..", "daemon.cjs");
 const REQUEST_TIMEOUT_MS = 20_000;

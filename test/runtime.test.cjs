@@ -5,14 +5,14 @@ const test = require("node:test");
 
 const runtimePath = path.resolve(__dirname, "../src/runtime.cjs");
 const runtime = require(runtimePath);
-const control = require("../src/control.cjs");
-const { closeLeader, startLocalLeader, __test: brokerServerTest } = require("../src/broker-server.cjs");
-const { pruneExpiredBrokerState } = require("../src/broker-state.cjs");
-const liveStatus = require("../src/live-status.cjs");
-const { splitMarkdown } = require("../src/format.cjs");
-const { validateSettings } = require("../src/settings.cjs");
-const telegramApi = require("../src/telegram-api.cjs");
-const { formatLocalTimestamp } = require("../src/time.cjs");
+const control = require("../src/telegram/control.cjs");
+const { closeLeader, startLocalLeader, __test: brokerServerTest } = require("../src/broker/server.cjs");
+const { pruneExpiredBrokerState } = require("../src/broker/state.cjs");
+const liveStatus = require("../src/session/live-status.cjs");
+const { splitMarkdown } = require("../src/telegram/format.cjs");
+const { validateSettings } = require("../src/shared/settings.cjs");
+const telegramApi = require("../src/telegram/api.cjs");
+const { formatLocalTimestamp } = require("../src/shared/time.cjs");
 const helpers = {
   ...control,
   ...brokerServerTest,

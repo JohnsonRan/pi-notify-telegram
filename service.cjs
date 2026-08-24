@@ -4,8 +4,8 @@ const { execFileSync } = require("node:child_process");
 const { mkdirSync, rmSync, writeFileSync } = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { daemonLogPath } = require("./src/daemon-log.cjs");
-const { AGENT_DIR, WINDOWS_DAEMON_MARKER } = require("./src/paths.cjs");
+const { daemonLogPath } = require("./src/service/daemon-log.cjs");
+const { AGENT_DIR, WINDOWS_DAEMON_MARKER } = require("./src/shared/paths.cjs");
 
 const SERVICE_NAME = "pi-notify-telegram";
 const WINDOWS_TASK = "PiNotifyTelegram";

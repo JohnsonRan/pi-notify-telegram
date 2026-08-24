@@ -1,7 +1,7 @@
 const { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } = require("node:fs");
 const path = require("node:path");
 const { format } = require("node:util");
-const { formatLocalTimestamp } = require("./time.cjs");
+const { formatLocalTimestamp } = require("../shared/time.cjs");
 
 const DEFAULT_MAX_BYTES = 256 * 1024;
 

@@ -7,7 +7,7 @@ const {
   appendBoundedOutput,
   parsePiUpdateCommand,
   runPiUpdate,
-} = require("../src/pi-update.cjs");
+} = require("../src/telegram/pi-update.cjs");
 
 function fakeChild(result) {
   const child = new EventEmitter();

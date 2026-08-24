@@ -1,11 +1,11 @@
 const net = require("node:net");
 const path = require("node:path");
-const { PROTOCOL_VERSION, attachLineReader, sendLine } = require("./bridge-protocol.cjs");
-const { pruneExpiredBrokerState, queuePersist, readBrokerState, trimMappings } = require("./broker-state.cjs");
-const { formatWakeExitDetail, normalizePiCommands } = require("./control.cjs");
-const { escapeHtml, renderTelegramChunkPairs, renderTelegramHtml, splitMarkdown } = require("./format.cjs");
-const { AGENT_DIR } = require("./paths.cjs");
-const { errorMessage, telegramCall, telegramFormattedCall } = require("./telegram-api.cjs");
+const { PROTOCOL_VERSION, attachLineReader, sendLine } = require("../bridge/protocol.cjs");
+const { pruneExpiredBrokerState, queuePersist, readBrokerState, trimMappings } = require("./state.cjs");
+const { formatWakeExitDetail, normalizePiCommands } = require("../telegram/control.cjs");
+const { escapeHtml, renderTelegramChunkPairs, renderTelegramHtml, splitMarkdown } = require("../telegram/format.cjs");
+const { AGENT_DIR } = require("../shared/paths.cjs");
+const { errorMessage, telegramCall, telegramFormattedCall } = require("../telegram/api.cjs");
 const {
   deliverPendingForSession,
   enqueueStream,
@@ -14,9 +14,9 @@ const {
   syncTelegramCommandMenu,
   withTopicRetry,
   __test: telegramRouterTest,
-} = require("./telegram-router.cjs");
-const { WakeLauncher } = require("./wake.cjs");
-const { version: PACKAGE_VERSION } = require("../package.json");
+} = require("../telegram/router.cjs");
+const { WakeLauncher } = require("../wake/launcher.cjs");
+const { version: PACKAGE_VERSION } = require("../../package.json");
 
 const STATE_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 

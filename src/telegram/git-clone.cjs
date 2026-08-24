@@ -1,7 +1,7 @@
 const { execFile } = require("node:child_process");
 const { lstat, realpath } = require("node:fs/promises");
 const path = require("node:path");
-const { resolveWakeCwd } = require("./wake.cjs");
+const { resolveWakeCwd } = require("../wake/launcher.cjs");
 
 const CLONE_TIMEOUT_MS = 10 * 60 * 1000;
 const WINDOWS_RESERVED_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;

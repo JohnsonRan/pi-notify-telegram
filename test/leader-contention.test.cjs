@@ -3,8 +3,8 @@ const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 const test = require("node:test");
 
-const brokerServerPath = path.resolve(__dirname, "../src/broker-server.cjs");
-const settingsPath = path.resolve(__dirname, "../src/settings.cjs");
+const brokerServerPath = path.resolve(__dirname, "../src/broker/server.cjs");
+const settingsPath = path.resolve(__dirname, "../src/shared/settings.cjs");
 
 test("a standby broker never writes state before acquiring the port", () => {
   const script = String.raw`

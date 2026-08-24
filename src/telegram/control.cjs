@@ -1,7 +1,7 @@
 const { createHash } = require("node:crypto");
 const path = require("node:path");
-const { formatLocalTimestamp } = require("./time.cjs");
-const { version: PACKAGE_VERSION } = require("../package.json");
+const { formatLocalTimestamp } = require("../shared/time.cjs");
+const { version: PACKAGE_VERSION } = require("../../package.json");
 
 const CONTROL_COMMANDS = Object.freeze([
   { command: "update", description: "Update all Pi packages" },

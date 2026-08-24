@@ -7,7 +7,7 @@ const {
   renderTelegramChunks,
   renderTelegramHtml,
   safeUrl,
-} = require("../src/format.cjs");
+} = require("../src/telegram/format.cjs");
 
 test("renders supported Markdown as Telegram-safe HTML", () => {
   const markdown = [

@@ -11,7 +11,7 @@ const {
   remoteRepositoryName,
   validateDirectoryName,
   validateRemote,
-} = require("../src/git-clone.cjs");
+} = require("../src/telegram/git-clone.cjs");
 
 test("parses Telegram clone commands without accepting extra shell syntax", () => {
   assert.deepEqual(parseGitCloneCommand("/clone https://github.com/example/demo.git"), {

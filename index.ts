@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { hostname } from "node:os";
 
 const require = createRequire(import.meta.url);
-const { decodeWakePayload, WAKE_SENTINEL } = require("./src/wake-payload.cjs") as {
+const { decodeWakePayload, WAKE_SENTINEL } = require("./src/wake/payload.cjs") as {
   decodeWakePayload(encoded: string | undefined): { text: string; expandPromptTemplates: boolean };
   WAKE_SENTINEL: string;
 };

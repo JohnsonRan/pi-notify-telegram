@@ -3,9 +3,9 @@ const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 const test = require("node:test");
 
-const brokerServerPath = path.resolve(__dirname, "../src/broker-server.cjs");
-const settingsPath = path.resolve(__dirname, "../src/settings.cjs");
-const { WAKE_SENTINEL } = require("../src/wake-payload.cjs");
+const brokerServerPath = path.resolve(__dirname, "../src/broker/server.cjs");
+const settingsPath = path.resolve(__dirname, "../src/shared/settings.cjs");
+const { WAKE_SENTINEL } = require("../src/wake/payload.cjs");
 
 test("creates a session from All Topics and wakes the same topic again", () => {
   const script = String.raw`
