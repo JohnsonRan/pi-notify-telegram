@@ -59,7 +59,7 @@ function response(result) { return { ok: true, status: 200, json: async () => ({
     chatId: 42,
     allowedUserId: 42,
     bridgeSecret: "${"b".repeat(64)}",
-    port: 43992,
+    port: 43993,
     wakeMode: true,
     wakeDefaultCwd: dir,
     wakeAllowedRoots: [dir],
