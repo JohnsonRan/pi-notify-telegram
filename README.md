@@ -115,7 +115,15 @@ Install the per-user service from the installed checkout:
 node "$HOME/.pi/agent/git/github.com/JohnsonRan/pi-telegram-operator/service.cjs" install
 ```
 
-The command selects the native service manager for the current platform:
+Stop the daemon and remove the per-user service registration:
+
+```bash
+node "$HOME/.pi/agent/git/github.com/JohnsonRan/pi-telegram-operator/service.cjs" uninstall
+```
+
+This keeps the installed checkout, configuration, daemon log, and Pi sessions previously opened by wake mode.
+
+The install command selects the native service manager for the current platform:
 
 - Windows: hidden `PiTelegramOperator` per-user Scheduled Task (no persistent console window)
 - macOS: `~/Library/LaunchAgents/com.johnsonran.pi-telegram-operator.plist`
