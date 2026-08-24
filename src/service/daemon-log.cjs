@@ -6,7 +6,7 @@ const { formatLocalTimestamp } = require("../shared/time.cjs");
 const DEFAULT_MAX_BYTES = 256 * 1024;
 
 function daemonLogPath(agentDir) {
-  return path.join(agentDir, "pi-notify-telegram.log");
+  return path.join(agentDir, "pi-telegram-operator.log");
 }
 
 function installDaemonLogging(options = {}) {
@@ -53,7 +53,7 @@ function installDaemonLogging(options = {}) {
         writeFileSync(logPath, Buffer.concat([marker, tail]), { mode: 0o600 });
       }
     } catch (error) {
-      original.error(`[pi-notify-telegram] Cannot write daemon log: ${error instanceof Error ? error.message : String(error)}`);
+      original.error(`[pi-telegram-operator] Cannot write daemon log: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 

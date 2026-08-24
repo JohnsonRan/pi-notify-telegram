@@ -73,7 +73,7 @@ function scheduleStreamDraft(state) {
     if (state.currentStream !== stream || text === stream.lastSent) return;
     stream.lastSent = text;
     sendStream(state, "streamDraft", stream).catch((error) => {
-      console.warn(`[pi-notify-telegram] Cannot stream draft: ${errorMessage(error)}`);
+      console.warn(`[pi-telegram-operator] Cannot stream draft: ${errorMessage(error)}`);
     });
   }, STREAM_THROTTLE_MS);
   stream.timer.unref?.();
@@ -85,7 +85,7 @@ function attach(pi) {
 
   pi.on("session_start", (_event, ctx) => {
     return initializeState(pi, ctx).catch((error) => {
-      console.warn(`[pi-notify-telegram] Cannot initialize: ${errorMessage(error)}`);
+      console.warn(`[pi-telegram-operator] Cannot initialize: ${errorMessage(error)}`);
     });
   });
 
@@ -145,7 +145,7 @@ function attach(pi) {
     const text = streamDraftText(stream);
     stream.lastSent = text;
     sendStream(state, "streamDraft", stream).catch((error) => {
-      console.warn(`[pi-notify-telegram] Cannot start stream: ${errorMessage(error)}`);
+      console.warn(`[pi-telegram-operator] Cannot start stream: ${errorMessage(error)}`);
     });
   });
 
@@ -166,7 +166,7 @@ function attach(pi) {
     stream.text = assistantText(event.message);
     state.currentStream = undefined;
     sendStream(state, "streamFinal", stream).catch((error) => {
-      console.warn(`[pi-notify-telegram] Cannot finalize stream: ${errorMessage(error)}`);
+      console.warn(`[pi-telegram-operator] Cannot finalize stream: ${errorMessage(error)}`);
     });
   });
 

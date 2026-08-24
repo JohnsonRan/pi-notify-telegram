@@ -5,11 +5,14 @@ const { mkdirSync, rmSync, writeFileSync } = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { daemonLogPath } = require("./src/service/daemon-log.cjs");
-const { AGENT_DIR, WINDOWS_DAEMON_MARKER } = require("./src/shared/paths.cjs");
+const {
+  AGENT_DIR,
+  WINDOWS_DAEMON_MARKER,
+} = require("./src/shared/paths.cjs");
 
-const SERVICE_NAME = "pi-notify-telegram";
-const WINDOWS_TASK = "PiNotifyTelegram";
-const MAC_LABEL = "com.johnsonran.pi-notify-telegram";
+const SERVICE_NAME = "pi-telegram-operator";
+const WINDOWS_TASK = "PiTelegramOperator";
+const MAC_LABEL = "com.johnsonran.pi-telegram-operator";
 const DAEMON_PATH = path.join(__dirname, "daemon.cjs");
 const WINDOWS_DAEMON_LAUNCHER_PATH = path.join(__dirname, "daemon-windows.vbs");
 
@@ -21,18 +24,17 @@ function xml(value) {
   return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]);
 }
 
-function systemdPath() {
-  return path.join(os.homedir(), ".config", "systemd", "user", `${SERVICE_NAME}.service`);
+function systemdPath(serviceName = SERVICE_NAME) {
+  return path.join(os.homedir(), ".config", "systemd", "user", `${serviceName}.service`);
 }
 
-function launchAgentPath() {
-  return path.join(os.homedir(), "Library", "LaunchAgents", `${MAC_LABEL}.plist`);
+function launchAgentPath(label = MAC_LABEL) {
+  return path.join(os.homedir(), "Library", "LaunchAgents", `${label}.plist`);
 }
 
-function windowsDaemonStopScript(daemonPath = DAEMON_PATH) {
-  const target = String(daemonPath).replace(/'/g, "''");
+function windowsDaemonStopScript() {
   const marker = WINDOWS_DAEMON_MARKER.replace(/'/g, "''");
-  return `$target='${target}'; $marker='${marker}'; $pattern='(?i)(?:^|\\s)"?' + [regex]::Escape($target) + '"?\\s+' + [regex]::Escape($marker) + '(?:\\s|$)'; Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -match $pattern } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
+  return `$marker='${marker}'; Get-CimInstance Win32_Process | Where-Object { if ($_.Name -ne 'node.exe') { return $false }; $pattern='(?i)(?:^|\\s)"?' + [regex]::Escape($marker) + '"?(?:\\s|$)'; $_.CommandLine -match $pattern } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
 }
 
 function windowsTaskStopWaitScript(taskName = WINDOWS_TASK, timeoutMs = 5_000) {
@@ -52,7 +54,7 @@ function windowsTaskXml(
 }
 
 function systemdUnit(nodePath = process.execPath, daemonPath = DAEMON_PATH, agentDir = AGENT_DIR, environmentPath = process.env.PATH || "") {
-  return `[Unit]\nDescription=Pi Telegram wake broker\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${JSON.stringify(nodePath)} ${JSON.stringify(daemonPath)}\nEnvironment=${JSON.stringify(`PI_CODING_AGENT_DIR=${agentDir}`)}\nEnvironment=${JSON.stringify(`PATH=${environmentPath}`)}\nPassEnvironment=DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR\nRestart=always\nRestartSec=3\nKillMode=process\n\n[Install]\nWantedBy=default.target\n`;
+  return `[Unit]\nDescription=TelegraPi Telegram operator for Pi\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${JSON.stringify(nodePath)} ${JSON.stringify(daemonPath)}\nEnvironment=${JSON.stringify(`PI_CODING_AGENT_DIR=${agentDir}`)}\nEnvironment=${JSON.stringify(`PATH=${environmentPath}`)}\nPassEnvironment=DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR\nRestart=always\nRestartSec=3\nKillMode=process\n\n[Install]\nWantedBy=default.target\n`;
 }
 
 function launchAgent(nodePath = process.execPath, daemonPath = DAEMON_PATH, agentDir = AGENT_DIR, environmentPath = process.env.PATH || "") {
@@ -66,7 +68,7 @@ function stopWindowsDaemonProcesses() {
 function stopWindows() {
   try { run("schtasks.exe", ["/End", "/TN", WINDOWS_TASK]); } catch {}
   stopWindowsDaemonProcesses();
-  run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", windowsTaskStopWaitScript()]);
+  run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", windowsTaskStopWaitScript(WINDOWS_TASK)]);
 }
 
 function startWindows() {
@@ -80,15 +82,15 @@ function installWindows() {
   writeFileSync(file, `\uFEFF${windowsTaskXml()}`, { encoding: "utf16le" });
   try {
     run("schtasks.exe", ["/Create", "/TN", WINDOWS_TASK, "/XML", file, "/F"]);
+    run("schtasks.exe", ["/Run", "/TN", WINDOWS_TASK]);
   } finally {
     rmSync(file, { force: true });
   }
-  run("schtasks.exe", ["/Run", "/TN", WINDOWS_TASK]);
 }
 
 function uninstallWindows() {
   stopWindows();
-  run("schtasks.exe", ["/Delete", "/TN", WINDOWS_TASK, "/F"]);
+  try { run("schtasks.exe", ["/Delete", "/TN", WINDOWS_TASK, "/F"]); } catch {}
 }
 
 function installLinux() {
@@ -109,6 +111,7 @@ function installMac() {
   const file = launchAgentPath();
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, launchAgent());
+  run("plutil", ["-lint", file]);
   try { run("launchctl", ["bootout", `gui/${process.getuid()}`, file]); } catch {}
   run("launchctl", ["bootstrap", `gui/${process.getuid()}`, file]);
 }

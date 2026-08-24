@@ -37,7 +37,7 @@ test("validates clone remotes and safe repository directory names", () => {
 });
 
 test("clones into wakeDefaultCwd and returns the repository working directory", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "pi-notify-telegram-clone-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-telegram-operator-clone-"));
   try {
     const calls = [];
     const result = await cloneRepository({

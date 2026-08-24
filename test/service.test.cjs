@@ -8,13 +8,13 @@ const test = require("node:test");
 const { WINDOWS_DAEMON_MARKER, launchAgent, systemdUnit, windowsDaemonStopScript, windowsTaskStopWaitScript, windowsTaskXml } = require("../service.cjs");
 
 test("stops only the exact Windows daemon process without killing its Pi children", () => {
-  const script = windowsDaemonStopScript("C:\\Pi Agent\\daemon's.cjs");
+  const script = windowsDaemonStopScript("C:\\different checkout\\daemon.cjs");
   assert.match(script, /Get-CimInstance Win32_Process/);
-  assert.match(script, /\[regex\]::Escape\(\$target\)/);
   assert.match(script, /\[regex\]::Escape\(\$marker\)/);
   assert.match(script, /Stop-Process -Id \$_.ProcessId -Force/);
-  assert.match(script, /daemon''s\.cjs/);
-  assert.match(script, /--pi-notify-telegram-service-daemon/);
+  assert.doesNotMatch(script, /different checkout/);
+  assert.match(script, /--pi-telegram-operator-service-daemon/);
+  assert.doesNotMatch(script, /pi-notify-telegram/);
   assert.doesNotMatch(script, /taskkill|\/T\b/i);
 });
 
@@ -40,7 +40,7 @@ setInterval(() => {}, 1000);
     while (!existsSync(marker) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
     childPid = Number(readFileSync(marker, "utf8"));
     assert.ok(Number.isInteger(childPid) && childPid > 0);
-    execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", windowsDaemonStopScript(fakeDaemon)]);
+    execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", windowsDaemonStopScript("C:\\different checkout\\daemon.cjs")]);
     const exitDeadline = Date.now() + 5_000;
     while (daemon.exitCode === null && Date.now() < exitDeadline) await new Promise((resolve) => setTimeout(resolve, 25));
     assert.notEqual(daemon.exitCode, null, "the daemon process should stop");
@@ -75,7 +75,7 @@ test("builds a hidden supervised unlimited-runtime Windows task", () => {
   assert.match(task, /<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/);
   assert.match(task, /<LogonType>InteractiveToken<\/LogonType>/);
   assert.match(task, /<Command>C:\\Windows\\System32\\wscript\.exe<\/Command>/);
-  assert.match(task, /\/\/B \/\/NoLogo &quot;C:\\Pi\\daemon-windows\.vbs&quot; &quot;C:\\node\.exe&quot; &quot;C:\\Pi\\daemon\.cjs&quot; &quot;--pi-notify-telegram-service-daemon&quot;/);
+  assert.match(task, /\/\/B \/\/NoLogo &quot;C:\\Pi\\daemon-windows\.vbs&quot; &quot;C:\\node\.exe&quot; &quot;C:\\Pi\\daemon\.cjs&quot; &quot;--pi-telegram-operator-service-daemon&quot;/);
 });
 
 test("Windows launcher waits for the daemon and returns its exit code", { skip: process.platform !== "win32" }, () => {
@@ -111,7 +111,7 @@ test("builds a restartable Linux systemd user unit", () => {
 
 test("builds a keep-alive macOS LaunchAgent with escaped paths", () => {
   const plist = launchAgent("/opt/A&B/node", "/Users/me/pi<notify>/daemon.cjs", "/Users/me/.pi/agent", "/opt/homebrew/bin:/usr/bin");
-  assert.match(plist, /com\.johnsonran\.pi-notify-telegram/);
+  assert.match(plist, /com\.johnsonran\.pi-telegram-operator/);
   assert.match(plist, /\/opt\/A&amp;B\/node/);
   assert.match(plist, /pi&lt;notify&gt;\/daemon\.cjs/);
   assert.match(plist, /\/opt\/homebrew\/bin:\/usr\/bin/);

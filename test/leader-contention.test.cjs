@@ -13,7 +13,7 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-telegram-contention-"));
-const statePath = path.join(dir, "pi-notify-telegram.state.json");
+const statePath = path.join(dir, "pi-telegram-operator.state.json");
 const sentinel = JSON.stringify({ offset: 777, mappings: [{ messageId: 1, threadId: 2, sessionId: "live", marker: "do-not-overwrite" }], pendingReplies: [], topics: [] }, null, 2) + "\n";
 fs.writeFileSync(statePath, sentinel);
 process.env.PI_CODING_AGENT_DIR = dir;

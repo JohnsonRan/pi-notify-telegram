@@ -224,7 +224,7 @@ function handleClientMessage(state, message) {
   } catch (error) {
     const detail = errorMessage(error);
     sendAck(false, detail);
-    console.warn(`[pi-notify-telegram] Cannot inject reply: ${detail}`);
+    console.warn(`[pi-telegram-operator] Cannot inject reply: ${detail}`);
   }
 }
 

@@ -12,7 +12,7 @@ test("clones a Telegram repository command and starts Pi in the clone", () => {
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-notify-telegram-clone-runtime-"));
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-telegram-operator-clone-runtime-"));
 const launchLog = path.join(dir, "launches.jsonl");
 const fakePi = path.join(dir, "fake-pi.cjs");
 const source = path.join(dir, "source", "demo.git");
@@ -25,7 +25,7 @@ process.env.GIT_CONFIG_COUNT = "1";
 process.env.GIT_CONFIG_KEY_0 = "url." + pathToFileURL(source).href + ".insteadOf";
 process.env.GIT_CONFIG_VALUE_0 = "https://example.test/org/demo.git";
 process.env.PI_CODING_AGENT_DIR = dir;
-fs.writeFileSync(path.join(dir, "pi-notify-telegram.state.json"), JSON.stringify({ offset: 0, mappings: [], pendingReplies: [], topics: [] }));
+fs.writeFileSync(path.join(dir, "pi-telegram-operator.state.json"), JSON.stringify({ offset: 0, mappings: [], pendingReplies: [], topics: [] }));
 
 let poll = 0;
 let messageId = 100;

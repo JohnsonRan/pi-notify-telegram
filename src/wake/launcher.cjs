@@ -95,7 +95,7 @@ class WakeLauncher {
     this.platform = String(options.platform || process.platform);
     this.nodeCommand = options.nodeCommand;
     this.terminalHostPath = options.terminalHostPath;
-    this.terminalSpecDir = String(options.terminalSpecDir || path.join(os.tmpdir(), "pi-notify-telegram"));
+    this.terminalSpecDir = String(options.terminalSpecDir || path.join(os.tmpdir(), "pi-telegram-operator"));
     this.powershell = options.powershell;
     this.osascript = options.osascript;
     this.processEnvironment = options.processEnvironment || process.env;

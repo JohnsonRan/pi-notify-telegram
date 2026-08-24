@@ -1,6 +1,6 @@
-# pi-notify-telegram
+# TelegraPi
 
-A threaded Telegram remote interface for [Pi](https://github.com/earendil-works/pi).
+`pi-telegram-operator` is a threaded Telegram operator for [Pi](https://github.com/earendil-works/pi).
 
 Each Pi session gets its own topic in the bot's private chat. Telegram replies are injected as real Pi user messages, and assistant text is streamed with Telegram's native `sendMessageDraft` API before being persisted as a normal message.
 
@@ -39,7 +39,7 @@ Threaded Mode must be enabled in the bot's private chat. A forum supergroup is n
 ## Install
 
 ```bash
-pi install git:github.com/JohnsonRan/pi-notify-telegram
+pi install git:github.com/JohnsonRan/pi-telegram-operator
 ```
 
 Restart Pi after installation.
@@ -49,7 +49,7 @@ Restart Pi after installation.
 Run the interactive setup utility from the installed Git checkout:
 
 ```bash
-node "$HOME/.pi/agent/git/github.com/JohnsonRan/pi-notify-telegram/setup.cjs"
+node "$HOME/.pi/agent/git/github.com/JohnsonRan/pi-telegram-operator/setup.cjs"
 ```
 
 If `PI_CODING_AGENT_DIR` points somewhere else, replace `$HOME/.pi/agent` with that directory. When developing from a clone, run `node setup.cjs` in the repository root. Stop all Pi sessions before rerunning setup so there is no competing Telegram `getUpdates` poller.
@@ -67,9 +67,9 @@ Files:
 
 | File | Purpose |
 | --- | --- |
-| `pi-notify-telegram.secret` | Telegram bot token only |
-| `pi-notify-telegram.json` | Allowed chat/user, localhost broker secret, and port |
-| `pi-notify-telegram.state.json` | Update offset, session/topic mappings, notification mappings, and pending replies |
+| `pi-telegram-operator.secret` | Telegram bot token only |
+| `pi-telegram-operator.json` | Allowed chat/user, localhost broker secret, and port |
+| `pi-telegram-operator.state.json` | Update offset, session/topic mappings, notification mappings, pending replies, and pending questions |
 
 Example non-secret configuration:
 
@@ -112,22 +112,22 @@ Only the configured `allowedUserId` can issue wake requests. One wake process ma
 Install the per-user service from the installed checkout:
 
 ```bash
-node "$HOME/.pi/agent/git/github.com/JohnsonRan/pi-notify-telegram/service.cjs" install
+node "$HOME/.pi/agent/git/github.com/JohnsonRan/pi-telegram-operator/service.cjs" install
 ```
 
 The command selects the native service manager for the current platform:
 
-- Windows: hidden per-user Scheduled Task (no persistent console window)
-- macOS: `~/Library/LaunchAgents/com.johnsonran.pi-notify-telegram.plist`
-- Linux: `~/.config/systemd/user/pi-notify-telegram.service`
+- Windows: hidden `PiTelegramOperator` per-user Scheduled Task (no persistent console window)
+- macOS: `~/Library/LaunchAgents/com.johnsonran.pi-telegram-operator.plist`
+- Linux: `~/.config/systemd/user/pi-telegram-operator.service`
 
-Service lifecycle commands are `install`, `start`, `stop`, `status`, and `uninstall`. The daemon writes bounded diagnostics to `~/.pi/agent/pi-notify-telegram.log`; `status` also prints the resolved log path. The daemon waits if an older embedded broker still owns the port, then takes ownership automatically after that Pi process exits. Service stop, restart, reinstall, and update operations terminate only the broker daemon; Pi sessions previously opened by wake mode remain running and reconnect to the replacement broker.
+Service lifecycle commands are `install`, `start`, `stop`, `status`, and `uninstall`. The daemon writes bounded diagnostics to `~/.pi/agent/pi-telegram-operator.log`; `status` also prints the resolved log path. If another broker owns the port, the daemon waits and takes ownership automatically after that process exits. Service stop, restart, reinstall, and update operations terminate only the broker daemon; Pi sessions previously opened by wake mode remain running and reconnect to the replacement broker.
 
 A running daemon keeps its loaded code after the package checkout updates. Restart it before testing a newly installed version:
 
 ```bash
-node "$HOME/.pi/agent/git/github.com/JohnsonRan/pi-notify-telegram/service.cjs" stop
-node "$HOME/.pi/agent/git/github.com/JohnsonRan/pi-notify-telegram/service.cjs" start
+node "$HOME/.pi/agent/git/github.com/JohnsonRan/pi-telegram-operator/service.cjs" stop
+node "$HOME/.pi/agent/git/github.com/JohnsonRan/pi-telegram-operator/service.cjs" start
 ```
 
 All Topics is command-only:

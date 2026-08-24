@@ -12,11 +12,11 @@ test("creates a session from All Topics and wakes the same topic again", () => {
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-notify-telegram-wake-runtime-"));
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-telegram-operator-wake-runtime-"));
 const launchLog = path.join(dir, "launches.jsonl");
 const fakePi = path.join(dir, "fake-pi.cjs");
 fs.writeFileSync(fakePi, "const fs=require('node:fs'); const payload=JSON.parse(Buffer.from(process.env.PI_TELEGRAM_WAKE_PAYLOAD,'base64url').toString('utf8')); fs.appendFileSync(" + JSON.stringify(launchLog) + ", JSON.stringify({args:process.argv.slice(2),payload}) + '\\n');\n");
-fs.writeFileSync(path.join(dir, "pi-notify-telegram.state.json"), JSON.stringify({ offset: 0, mappings: [], pendingReplies: [], topics: [] }));
+fs.writeFileSync(path.join(dir, "pi-telegram-operator.state.json"), JSON.stringify({ offset: 0, mappings: [], pendingReplies: [], topics: [] }));
 process.env.PI_CODING_AGENT_DIR = dir;
 
 let poll = 0;
@@ -79,7 +79,7 @@ function response(result) { return { ok: true, status: 200, json: async () => ({
   }
   await closeLeader(state);
   const launches = fs.readFileSync(launchLog, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
-  const stored = JSON.parse(fs.readFileSync(path.join(dir, "pi-notify-telegram.state.json"), "utf8"));
+  const stored = JSON.parse(fs.readFileSync(path.join(dir, "pi-telegram-operator.state.json"), "utf8"));
   console.log(JSON.stringify({ launches, topics: stored.topics, sent }));
   process.exit(0);
 })().catch((error) => { console.error(error); process.exit(1); });

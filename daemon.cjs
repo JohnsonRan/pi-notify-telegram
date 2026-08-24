@@ -10,11 +10,11 @@ const logPath = installDaemonLogging({
   logPath: daemonLogPath(agentDir),
   mirror: process.stdout.isTTY || process.stderr.isTTY,
 });
-console.log(`[pi-notify-telegram] Wake daemon starting (pid ${process.pid}, log ${logPath})`);
+console.log(`[pi-telegram-operator] Wake daemon starting (pid ${process.pid}, log ${logPath})`);
 
 const { runWakeDaemon } = require("./src/runtime.cjs");
 
 runWakeDaemon().catch((error) => {
-  console.error(`[pi-notify-telegram] Wake daemon failed: ${error instanceof Error ? error.message : String(error)}`);
+  console.error(`[pi-telegram-operator] Wake daemon failed: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
 });

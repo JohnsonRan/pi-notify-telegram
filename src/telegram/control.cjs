@@ -38,7 +38,7 @@ function formatDuration(milliseconds) {
 function formatBrokerStatus(state, now = Date.now()) {
   const startedAt = Number(state.startedAt) || now;
   return [
-    "Pi Telegram wake broker is running.",
+    "TelegraPi broker is running.",
     `Broker PID: ${state.pid || process.pid}`,
     `Version: ${state.packageVersion || PACKAGE_VERSION}`,
     `Started: ${formatLocalTimestamp(startedAt)}`,
@@ -84,7 +84,7 @@ function controlPanel(state, command, now = Date.now()) {
   }
   return {
     text: [
-      "Pi Telegram wake commands:",
+      "TelegraPi commands:",
       "/update — run pi update --all",
       "pi update --all — same as /update",
       "/clone <repository-url> [directory] — clone into wakeDefaultCwd and run Pi",

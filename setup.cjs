@@ -5,18 +5,15 @@ const { readFile, rename, unlink, writeFile } = require("node:fs/promises");
 const net = require("node:net");
 const readline = require("node:readline/promises");
 const { stdin, stdout } = require("node:process");
-const { CONFIG_PATH, DEFAULT_PORT, SECRET_PATH, STATE_PATH } = require("./src/shared/paths.cjs");
+const {
+  CONFIG_PATH,
+  DEFAULT_PORT,
+  SECRET_PATH,
+  STATE_PATH,
+} = require("./src/shared/paths.cjs");
 const { preserveOperationalConfig } = require("./src/shared/settings.cjs");
 
-async function brokerIsRunning() {
-  let port;
-  try {
-    const config = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
-    port = Number(config.port || DEFAULT_PORT);
-  } catch (error) {
-    if (error?.code === "ENOENT") return false;
-    throw error;
-  }
+async function portIsListening(port) {
   return new Promise((resolve) => {
     const socket = net.createConnection({ host: "127.0.0.1", port });
     const done = (running) => {
@@ -27,6 +24,12 @@ async function brokerIsRunning() {
     socket.once("connect", () => done(true));
     socket.once("error", () => done(false));
   });
+}
+
+async function brokerIsRunning(read = readFile) {
+  const config = await readOptionalJson(CONFIG_PATH, read);
+  const port = Number(config?.port || DEFAULT_PORT);
+  return Number.isInteger(port) && port >= 1024 && port <= 65535 && portIsListening(port);
 }
 
 async function call(token, method, payload, timeoutMs = 35_000) {
@@ -81,14 +84,26 @@ async function readOptionalJson(file, read = readFile) {
   }
 }
 
+async function readOptionalState(file, read = readFile) {
+  try {
+    return { value: await readOptionalJson(file, read), invalid: false };
+  } catch (error) {
+    if (error instanceof SyntaxError) return { value: undefined, invalid: true };
+    throw error;
+  }
+}
+
 async function mergePreviousInstallation(config, state, selected, read = readFile) {
   let previousConfig;
   let previousState;
   try {
-    [previousConfig, previousState] = await Promise.all([
+    const [currentConfig, stateResult] = await Promise.all([
       readOptionalJson(CONFIG_PATH, read),
-      readOptionalJson(STATE_PATH, read),
+      readOptionalState(STATE_PATH, read),
     ]);
+    if (stateResult.invalid) throw new Error("Telegram state file is invalid");
+    previousConfig = currentConfig;
+    previousState = stateResult.value;
   } catch (error) {
     throw new Error("Existing Telegram config/state is invalid; move it aside before rerunning setup", { cause: error });
   }
@@ -98,6 +113,7 @@ async function mergePreviousInstallation(config, state, selected, read = readFil
   preserveOperationalConfig(config, previousConfig);
   if (previousState) {
     state = {
+      generation: Math.max(Number(state.generation) || 0, Number(previousState.generation) || 0),
       offset: Math.max(state.offset, Number(previousState.offset) || 0),
       mappings: Array.isArray(previousState.mappings) ? previousState.mappings : [],
       pendingReplies: Array.isArray(previousState.pendingReplies) ? previousState.pendingReplies : [],
@@ -188,21 +204,24 @@ async function main() {
       wakePiCommandArgs: [],
       wakeOpenTerminal: true,
     };
-    let state = { offset, mappings: [], pendingReplies: [], pendingQuestions: [], topics: [] };
+    let state = { generation: 0, offset, mappings: [], pendingReplies: [], pendingQuestions: [], topics: [] };
     ({ config, state } = await mergePreviousInstallation(config, state, selected));
 
+    const secretContent = `${token}\n`;
+    const configContent = `${JSON.stringify(config, null, 2)}\n`;
+    const stateContent = `${JSON.stringify(state, null, 2)}\n`;
     await writeStagedFiles([
-      { file: SECRET_PATH, content: `${token}\n`, options: { mode: 0o600 } },
-      { file: CONFIG_PATH, content: `${JSON.stringify(config, null, 2)}\n`, options: { mode: 0o600 } },
-      { file: STATE_PATH, content: `${JSON.stringify(state, null, 2)}\n`, options: { mode: 0o600 } },
+      { file: SECRET_PATH, content: secretContent, options: { mode: 0o600 } },
+      { file: CONFIG_PATH, content: configContent, options: { mode: 0o600 } },
+      { file: STATE_PATH, content: stateContent, options: { mode: 0o600 } },
     ]);
     await call(token, "sendMessage", {
       chat_id: selected.chat.id,
-      text: "Pi threaded Telegram extension is configured successfully.",
+      text: "TelegraPi is configured successfully.",
     });
     stdout.write(`Saved token to ${SECRET_PATH}\n`);
     stdout.write(`Saved routing config to ${CONFIG_PATH}\n`);
-    stdout.write("Setup complete. Return to Pi and ask it to finish the migration.\n");
+    stdout.write("Setup complete. Restart Pi to load TelegraPi.\n");
   } finally {
     terminal.close();
   }
@@ -215,4 +234,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = Object.freeze({ mergePreviousInstallation, preserveOperationalConfig, writeStagedFiles });
+module.exports = Object.freeze({ brokerIsRunning, mergePreviousInstallation, preserveOperationalConfig, readOptionalState, writeStagedFiles });

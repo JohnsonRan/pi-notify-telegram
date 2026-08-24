@@ -619,10 +619,10 @@ test("routes two Pi sessions through separate private topics and streams output"
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-notify-telegram-test-"));
-fs.writeFileSync(path.join(dir, "pi-notify-telegram.secret"), "123456:${"a".repeat(32)}\n");
-fs.writeFileSync(path.join(dir, "pi-notify-telegram.json"), JSON.stringify({ chatId: 42, allowedUserId: 42, bridgeSecret: "${"b".repeat(64)}", port: 43989, wakeMode: true, wakeDefaultCwd: dir, wakeAllowedRoots: [dir], wakeOpenTerminal: false }));
-fs.writeFileSync(path.join(dir, "pi-notify-telegram.state.json"), JSON.stringify({ offset: 0, mappings: [], pendingReplies: [], topics: [] }));
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-telegram-operator-test-"));
+fs.writeFileSync(path.join(dir, "pi-telegram-operator.secret"), "123456:${"a".repeat(32)}\n");
+fs.writeFileSync(path.join(dir, "pi-telegram-operator.json"), JSON.stringify({ chatId: 42, allowedUserId: 42, bridgeSecret: "${"b".repeat(64)}", port: 43989, wakeMode: true, wakeDefaultCwd: dir, wakeAllowedRoots: [dir], wakeOpenTerminal: false }));
+fs.writeFileSync(path.join(dir, "pi-telegram-operator.state.json"), JSON.stringify({ offset: 0, mappings: [], pendingReplies: [], topics: [] }));
 process.env.PI_CODING_AGENT_DIR = dir;
 process.env.PI_TELEGRAM_DAEMON = "1";
 
@@ -754,7 +754,7 @@ async function emit(pi, event, payload, ctx) {
   ]);
   await new Promise((resolve) => setTimeout(resolve, 600));
 
-  const state = JSON.parse(fs.readFileSync(path.join(dir, "pi-notify-telegram.state.json"), "utf8"));
+  const state = JSON.parse(fs.readFileSync(path.join(dir, "pi-telegram-operator.state.json"), "utf8"));
   const result = {
     pi1: pi1.injected,
     pi2: pi2.injected,

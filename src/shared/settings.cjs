@@ -1,5 +1,9 @@
 const { readFile } = require("node:fs/promises");
-const { CONFIG_PATH, DEFAULT_PORT, SECRET_PATH } = require("./paths.cjs");
+const {
+  CONFIG_PATH,
+  DEFAULT_PORT,
+  SECRET_PATH,
+} = require("./paths.cjs");
 
 const OPERATIONAL_CONFIG_VALIDATORS = Object.freeze({
   port: (value) => Number.isInteger(value) && value >= 1024 && value <= 65535,
@@ -66,26 +70,43 @@ function validateSettings(botTokenValue, raw) {
   });
 }
 
-async function readSettings(options = {}) {
-  const read = options.readFile || readFile;
-  const secretPath = options.secretPath || SECRET_PATH;
-  const configPath = options.configPath || CONFIG_PATH;
-  let token;
-  let configText;
+async function readOptional(read, file) {
   try {
-    [token, configText] = await Promise.all([read(secretPath, "utf8"), read(configPath, "utf8")]);
+    return await read(file, "utf8");
   } catch (error) {
-    if (error?.code === "ENOENT") {
-      throw new Error("Telegram setup is incomplete. Run the installed pi-notify-telegram setup.cjs first.");
-    }
+    if (error?.code === "ENOENT") return undefined;
     throw error;
   }
+}
+
+async function readSettingsPair(read, secretPath, configPath, label) {
+  const [token, configText] = await Promise.all([
+    readOptional(read, secretPath),
+    readOptional(read, configPath),
+  ]);
+  const count = Number(token !== undefined) + Number(configText !== undefined);
+  if (count === 0) return undefined;
+  if (count !== 2) return { incomplete: true, label };
   try {
-    return validateSettings(token, JSON.parse(configText));
+    return { settings: validateSettings(token, JSON.parse(configText)) };
   } catch (error) {
     if (error instanceof SyntaxError) throw new Error(`Telegram config contains invalid JSON: ${configPath}`);
     throw error;
   }
+}
+
+async function readSettings(options = {}) {
+  const read = options.readFile || readFile;
+  const secretPath = options.secretPath || SECRET_PATH;
+  const configPath = options.configPath || CONFIG_PATH;
+  const pair = await readSettingsPair(read, secretPath, configPath, "TelegraPi");
+  if (pair?.incomplete) {
+    throw new Error(`${pair.label} Telegram settings are incomplete; both secret and config files are required`);
+  }
+  if (!pair?.settings) {
+    throw new Error("Telegram setup is incomplete. Run the installed pi-telegram-operator setup.cjs first.");
+  }
+  return pair.settings;
 }
 
 module.exports = Object.freeze({ preserveOperationalConfig, readSettings, validateSettings });

@@ -1,7 +1,7 @@
 {
-  "name": "pi-notify-telegram",
-  "version": "0.6.1",
-  "description": "Threaded Telegram remote interface for Pi sessions with native streaming and notification replies",
+  "name": "pi-telegram-operator",
+  "version": "1.0.0",
+  "description": "TelegraPi: a threaded Telegram operator for Pi sessions",
   "type": "module",
   "files": [
     "index.ts",
@@ -47,12 +47,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/JohnsonRan/pi-notify-telegram.git"
+    "url": "git+https://github.com/JohnsonRan/pi-telegram-operator.git"
   },
   "bugs": {
-    "url": "https://github.com/JohnsonRan/pi-notify-telegram/issues"
+    "url": "https://github.com/JohnsonRan/pi-telegram-operator/issues"
   },
-  "homepage": "https://github.com/JohnsonRan/pi-notify-telegram#readme",
+  "homepage": "https://github.com/JohnsonRan/pi-telegram-operator#readme",
   "dependencies": {
     "typebox": "^1.3.7"
   }

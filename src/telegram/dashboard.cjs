@@ -72,7 +72,7 @@ async function syncTopicDashboard(state, topic, update = {}) {
       chat_id: state.secret.chatId,
       message_id: sent.message_id,
       disable_notification: true,
-    }).catch((error) => console.warn(`[pi-notify-telegram] Cannot pin session dashboard: ${errorMessage(error)}`));
+    }).catch((error) => console.warn(`[pi-telegram-operator] Cannot pin session dashboard: ${errorMessage(error)}`));
     return sent.message_id;
   });
   state.dashboardQueues.set(topic.sessionId, next);
