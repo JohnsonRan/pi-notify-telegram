@@ -134,6 +134,40 @@ test("builds Telegram control panels with inline buttons", () => {
   assert.equal(helpers.parseRestoreCallback("restore:session-id"), undefined);
 });
 
+test("runs the exact Pi update command from All Topics", async () => {
+  const originalFetch = global.fetch;
+  const sent = [];
+  const updateCalls = [];
+  global.fetch = async (url, options) => {
+    const method = url.split("/").pop();
+    const body = JSON.parse(options.body);
+    assert.equal(method, "sendMessage");
+    sent.push(body);
+    return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: sent.length } }) };
+  };
+  try {
+    await helpers.handleControlMessage({
+      secret: {
+        token: `123456:${"a".repeat(32)}`,
+        chatId: 42,
+        wakePiCommand: "custom-pi",
+        wakeDefaultCwd: "C:\\Work",
+        linkPreview: false,
+      },
+      runPiUpdate: async (options) => {
+        updateCalls.push(options);
+        return "Updated everything";
+      },
+    }, { message_id: 9, text: "pi update --all" });
+  } finally {
+    global.fetch = originalFetch;
+  }
+  assert.deepEqual(updateCalls, [{ piCommand: "custom-pi", cwd: "C:\\Work" }]);
+  assert.match(sent[0].text, /Running pi update --all/);
+  assert.match(sent[1].text, /Pi update completed/);
+  assert.match(sent[1].text, /Updated everything/);
+});
+
 test("answers and applies authorized Telegram control callbacks", async () => {
   const originalFetch = global.fetch;
   const calls = [];

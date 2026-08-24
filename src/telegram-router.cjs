@@ -5,6 +5,7 @@ const { MAX_PENDING_REPLIES, MAX_TOPICS, pruneExpiredBrokerState, queuePersist }
 const { CONTROL_COMMANDS, CONTROL_PANEL_COMMANDS, RESTORE_CONTEXT_PROMPT, controlPanel, parseControlCallback, parseRestoreCallback, topicName, translateTelegramCommand } = require("./control.cjs");
 const { splitMarkdown } = require("./format.cjs");
 const { cloneRepository, parseGitCloneCommand } = require("./git-clone.cjs");
+const { parsePiUpdateCommand, runPiUpdate } = require("./pi-update.cjs");
 const { errorMessage, telegramCall } = require("./telegram-api.cjs");
 const { parseControlCommand, resolveWakeCwd } = require("./wake.cjs");
 
@@ -246,11 +247,26 @@ async function launchWakeSession(state, topic, prompt, replyTo) {
 
 async function handleControlMessage(state, message) {
   const cloneCommand = parseGitCloneCommand(message.text);
+  const updateCommand = parsePiUpdateCommand(message.text);
   const parsed = parseControlCommand(message.text);
   const replyOptions = {
     replyTo: message.message_id,
     ...(Number.isSafeInteger(message.message_thread_id) ? { threadId: message.message_thread_id } : {}),
   };
+  if (updateCommand) {
+    await sendBrokerText(state, "Running pi update --all…", replyOptions);
+    const output = await (state.runPiUpdate || runPiUpdate)({
+      piCommand: state.secret.wakePiCommand,
+      cwd: state.secret.wakeDefaultCwd || process.cwd(),
+    });
+    await sendBrokerText(state, [
+      "Pi update completed.",
+      ...(output ? ["", output] : []),
+      "",
+      "Restart running Pi sessions to load updated extensions.",
+    ].join("\n"), replyOptions);
+    return;
+  }
   if (cloneCommand) {
     await sendBrokerText(state, "Cloning repository into wakeDefaultCwd…", replyOptions);
     const cloned = await (state.cloneRepository || cloneRepository)({
@@ -269,7 +285,7 @@ async function handleControlMessage(state, message) {
     return;
   }
   if (!parsed) {
-    await sendBrokerText(state, "Use /clone, /new, /sessions, /status, or /help in All Topics.", replyOptions);
+    await sendBrokerText(state, "Use /update, /clone, /new, /sessions, /status, or /help in All Topics.", replyOptions);
     return;
   }
   if (CONTROL_PANEL_COMMANDS.has(parsed.command)) {

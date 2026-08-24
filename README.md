@@ -133,6 +133,8 @@ node "$HOME/.pi/agent/git/github.com/JohnsonRan/pi-notify-telegram/service.cjs" 
 All Topics is command-only:
 
 ```text
+/update
+pi update --all
 /clone https://github.com/owner/repository.git
 /clone git@github.com:owner/repository.git local-name
 git clone https://github.com/owner/repository.git
@@ -143,6 +145,8 @@ git clone https://github.com/owner/repository.git
 /status
 /help
 ```
+
+`/update` and the equivalent `pi update --all` form run the exact Pi update command without a shell, return bounded command output to Telegram, and remind you to restart running Pi sessions so updated extensions are loaded.
 
 `/clone` and the equivalent `git clone` form clone one HTTPS or SSH repository into `wakeDefaultCwd`, create a private session topic for the repository, and start Pi with the cloned repository as its working directory. An optional destination must be a single safe directory name; absolute paths, parent traversal, shell operators, and arbitrary Git options are rejected. The configured default directory must remain inside `wakeAllowedRoots`.
 
